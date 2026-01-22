@@ -1,0 +1,8 @@
+
+{
+  "name": "Sentinel AI: SOC Operations Copilot",
+  "description": "An advanced AI-driven Security Operations Center (SOC) platform for incident analysis, automated log forensics, and real-time threat intelligence gathering using Gemini 3 and Live API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
