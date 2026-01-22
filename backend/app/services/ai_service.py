@@ -216,9 +216,28 @@ class AIService:
         corr_count = len(correlated_alerts)
 
         fake_query = self._looks_like_fake_or_invalid_query(query)
+        ip_list = extracted_iocs.get("ips", []) or []
+        public_dns_ips = {"8.8.8.8", "1.1.1.1", "9.9.9.9"}
+        non_ip_ioc_count = (
+            len(extracted_iocs.get("cves", []) or [])
+            + len(extracted_iocs.get("domains", []) or [])
+            + len(extracted_iocs.get("sha256", []) or [])
+            + len(extracted_iocs.get("md5", []) or [])
+        )
+        is_ip_only = len(ip_list) > 0 and non_ip_ioc_count == 0
 
         # If nothing exists anywhere -> return a strict negative summary WITHOUT LLM
         if corr_count == 0 and nvd_count == 0 and kev_count == 0 and otx_count == 0:
+            note = ""
+            if fake_query:
+                note = "\n\nNote: The query appears invalid or unverified."
+            if is_ip_only:
+                note += "\n\nNote: The IP appears commonly benign unless context suggests abuse."
+                if any(ip in public_dns_ips for ip in ip_list):
+                    note += (
+                        "\n\nContext: This IP is a public DNS resolver. It is typically benign unless you see "
+                        "abnormal DNS volume, unusual destination ports, tunneling patterns, or suspicious domains."
+                    )
             return (
                 "⚠️ No reliable correlation found.\n\n"
                 f"Query: {query}\n"
@@ -227,7 +246,7 @@ class AIService:
                 "- Verify the query (try a real CVE like CVE-2021-44228)\n"
                 "- Try searching with an IP/domain/hash from your alert logs\n"
                 "- Ensure your agents are generating alerts for this activity"
-            ).strip()
+            ).strip() + note
 
         tone_note = ""
         if fake_query:
@@ -241,10 +260,15 @@ You are a SOC Threat Intel Correlation Analyst.
 
 STRICT RULES:
 - ONLY use the data given below.
+- Do NOT assume an IOC is malicious without evidence.
+- Some IOCs are commonly benign (e.g., 8.8.8.8, 1.1.1.1, 9.9.9.9) unless context shows abuse.
+- If query is a public DNS IP, explain it is likely benign unless abnormal context exists and ask what context triggered the investigation.
+- Only claim maliciousness if correlated alerts or external intel confirm it.
 - If external intel is empty, say "No public intel found".
 - Do NOT invent CVSS, exploited status, vendor/product, or attack details.
 - If query looks invalid/fake, warn the analyst clearly.
-- Output must be short, SOC-ready, and actionable.
+- Do NOT include UI titles like "Sentinel Intelligence Report" or query type labels.
+- Output must be clean markdown text only (no code fences, no JSON).
 - Max words: {max_words}
 
 {tone_note}
@@ -261,16 +285,31 @@ Correlated Alerts (SOC DB):
 External Intel:
 {json.dumps(external_intel, indent=2)}
 
-Write in this format:
+Response format:
+Short Answer:
+(2–5 lines)
 
-1) What we searched
-2) What we found internally
-3) What external intel confirms
-4) Recommended next steps (3 bullets)
+What is it?:
+Internal Evidence:
+External Intel Confirmation:
+Likely Verdict (benign/suspicious/unknown + confidence):
+Next Steps:
 """
 
-        out = await self._ask_ollama(prompt)
-        return out.strip()
+        try:
+            out = await self._ask_ollama(prompt)
+            return self._clean_llm_output(out).strip()
+        except Exception:
+            return (
+                "⚠️ Summary generation failed due to AI service unavailability.\n\n"
+                f"Query: {query}\n"
+                f"Internal alerts: {corr_count}\n"
+                f"External intel: NVD={nvd_count}, KEV={kev_count}, OTX={otx_count}\n"
+                "Next steps:\n"
+                "- Review internal alerts for context\n"
+                "- Re-try external intel lookups later\n"
+                "- Add detections for related IOCs"
+            ).strip()
 
     # =========================================================
     # Phase 5 Step 1: Query Classification using AI (NEW)
@@ -318,7 +357,11 @@ User Query:
 {query}
 """
 
-        raw = await self._ask_ollama(prompt)
+        try:
+            raw = await self._ask_ollama(prompt)
+        except Exception:
+            return {"type": "analyst_question", "reason": "LLM unavailable; fallback to analyst_question"}
+
         cleaned = self._clean_llm_output(raw)
         extracted = self._extract_json_from_text(cleaned)
 
@@ -329,11 +372,10 @@ User Query:
 
             allowed = {"ioc_query", "mitre_query", "analyst_question", "out_of_scope", "unsafe_request"}
             if qtype not in allowed:
-                return {"type": "out_of_scope", "reason": "Classifier returned invalid type"}
+                return {"type": "analyst_question", "reason": "Classifier returned invalid type"}
 
             return {"type": qtype, "reason": reason or "Classified successfully"}
         except Exception:
-            # fallback conservative
             return {"type": "analyst_question", "reason": "Classifier JSON failed; fallback to analyst_question"}
 
     # =========================================================
@@ -341,35 +383,6 @@ User Query:
     # - Block offensive/hacking instructions
     # - Allow only defensive/SOC guidance
     # =========================================================
-    def _is_disallowed_request(self, query: str) -> bool:
-        """
-        Blocks malicious / offensive / hacking requests.
-        Conservative guardrail.
-        """
-        if not query:
-            return False
-
-        q = query.strip().lower()
-
-        disallowed_keywords = [
-            # hacking / intrusion
-            "hack", "bypass", "exploit", "payload", "reverse shell", "shellcode",
-            "metasploit", "msfvenom", "cobalt strike", "beacon",
-            "sql injection", "xss payload", "csrf bypass", "rce",
-            "privilege escalation exploit", "0day", "zero day",
-            "crack password", "bruteforce", "brute force attack",
-            "steal", "phish", "phishing kit", "credential dump",
-            "mimikatz", "dump lsass", "keylogger",
-
-            # malware creation
-            "create malware", "make malware", "write malware", "build malware",
-
-            # illegal intent
-            "how to break into", "how to attack", "ddos", "botnet"
-        ]
-
-        return any(k in q for k in disallowed_keywords)
-
     def _guardrail_refusal(self, query: str) -> str:
         """
         Safe refusal response with defensive alternatives.
@@ -383,6 +396,9 @@ User Query:
             "- Incident response steps\n"
             "- MITRE ATT&CK mapping and detection ideas\n"
         ).strip()
+
+    def cyber_guardrail_response(self, query: str) -> str:
+        return self._guardrail_refusal(query)
 
     def out_of_scope_response(self, query: str) -> str:
         """
@@ -400,41 +416,6 @@ User Query:
             "- CVE-2021-44228\n"
         ).strip()
 
-    def is_cybersecurity_related_query(self, query: str) -> bool:
-        """
-        Lightweight fallback check.
-        Not used for main classification (AI does it),
-        but useful as safety fallback.
-        """
-        if not query:
-            return False
-
-        q = query.strip().lower()
-
-        cyber_signals = [
-            "cve-", "ioc", "mitre", "tactic", "technique", "apt",
-            "siem", "soc", "edr", "xdr", "ids", "ips",
-            "incident response", "forensics", "malware", "ransomware", "phishing",
-            "windows event", "sysmon", "splunk", "sigma", "yara",
-            "hash", "sha256", "md5", "domain", "ip address"
-        ]
-
-        return any(s in q for s in cyber_signals)
-
-    def safe_refuse_and_redirect(self, query: str) -> str:
-        """
-        If user asks out-of-topic questions, redirect them back to cybersecurity.
-        """
-        return (
-            "⚠️ I can only help with Cybersecurity / SOC / Threat Intel topics in this system.\n\n"
-            f"Your query: {query}\n\n"
-            "Try asking something like:\n"
-            "- What is process injection and how to detect it?\n"
-            "- Explain lateral movement with examples\n"
-            "- Search CVE-2021-44228\n"
-            "- What does T1055 mean in MITRE ATT&CK?\n"
-        ).strip()
-
     async def answer_cybersecurity_question(
         self,
         query: str,
@@ -450,14 +431,6 @@ User Query:
         """
         context = context or {}
 
-        # ✅ Guardrail first
-        if self._is_disallowed_request(query):
-            return self._guardrail_refusal(query)
-
-        # still block non-cyber questions
-        if not self.is_cybersecurity_related_query(query):
-            return self.safe_refuse_and_redirect(query)
-
         prompt = f"""
 You are a Senior SOC Analyst and Cybersecurity Expert.
 
@@ -466,25 +439,64 @@ User Question:
 
 STRICT RULES:
 - Answer only in cybersecurity / blue-team / defensive context.
+- Assume the question is cybersecurity-related and answer it directly.
 - DO NOT provide hacking steps, exploitation instructions, payloads, malware creation, or bypass methods.
-- If user asks offensive steps, refuse and provide defensive alternatives only.
-- If the question is small, give a small simple answer.
-- If the question is complex, give a detailed but easy answer.
+- If the user asks for offensive steps, refuse and provide defensive alternatives only.
+- Prefer medium-to-detailed answers by default. Only keep it short if the user asks for a short answer.
+- If the query includes how/steps/process/procedure/investigate/workflow/triage/playbook, always respond in steps.
+- If the user asks to explain multiple items (OSI layers, CIA triad, TCP handshake), provide a structured breakdown (table or bullets).
+- Let the intent and context decide which sections to include.
+- Do NOT include "Sentinel Intelligence Report" or any A/B/C query labels.
+- Output must be clean markdown text only (no code fences, no JSON).
 - Do NOT hallucinate or make up facts.
-- If not enough info, say: "Not enough data" and suggest what logs/telemetry to check.
+- If not enough info, say: "Not enough data to confirm." and suggest logs/telemetry to check.
 - Keep answer under {max_words} words.
+- Special case: if the query is an IP like 8.8.8.8, 1.1.1.1, or 9.9.9.9, state it is a public DNS service and only suspicious in abnormal context.
 
 Helpful Context (may be empty):
 {json.dumps(context, indent=2)}
 
-Answer format:
-- Short Answer
-- Detection Ideas (2-4 bullets)
-- Mitigation / Response (2-4 bullets)
+Output format rules (always start with Short Answer):
+Short Answer:
+(2–5 lines)
+
+Then choose ONLY the sections that fit the question:
+
+If informational / educational:
+Detailed Explanation:
+Key Points:
+Example:
+
+If how-to / steps / investigation:
+Step-by-step Answer:
+Common Mistakes:
+Practical Checklist:
+
+If comparison:
+Comparison:
+(table format)
+
+If broad:
+Summary Checklist:
+
+Actions:
+- If purely informational: "No action required (informational query)"
+- If incident-like: list 3–6 real SOC actions
 """
 
-        out = await self._ask_ollama(prompt)
-        return out.strip()
+        try:
+            out = await self._ask_ollama(prompt)
+            return self._clean_llm_output(out).strip()
+        except Exception:
+            return (
+                "Short Answer: Not enough data to provide an AI-generated response right now.\n"
+                "Detection Ideas:\n"
+                "- Check relevant Windows/Linux logs for suspicious events\n"
+                "- Correlate with SIEM alerts and endpoint telemetry\n"
+                "Mitigation / Response:\n"
+                "- Apply least privilege and hardening controls\n"
+                "- Validate network segmentation and access controls"
+            ).strip()
 
     # =========================================================
     # Existing: Log Analysis (KEEP WORKING)

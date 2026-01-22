@@ -19,6 +19,15 @@ ai_service = AIService()
 intel_sources = ThreatIntelSources()
 mitre_service = MitreOfflineService()
 
+# Test cases:
+# - T1071
+# - What is T1071 in MITRE ATT&CK?
+# - Explain T1055 Process Injection
+# - 8.8.8.8
+# - 1.1.1.1
+# - What is MFA?
+# - Explain OSI model and each layer
+# - How to investigate brute force login attempts?
 
 # -------------------------
 # Models
@@ -129,6 +138,97 @@ def enrich_query_with_keywords(query: str, extracted: Dict[str, Any]) -> Dict[st
     return extracted
 
 
+def build_report(
+    section_label: str,
+    summary: str,
+    internal_evidence: str,
+    external_intel: str,
+    mitre_mapping: str,
+    next_steps: str
+) -> str:
+    parts = [
+        "Sentinel Intelligence Report",
+        section_label,
+        "",
+        "Summary:",
+        summary.strip() if summary else "No summary available.",
+        "",
+        "Internal Evidence:",
+        internal_evidence.strip() if internal_evidence else "None",
+        "",
+        "External Intel:",
+        external_intel.strip() if external_intel else "None",
+        "",
+        "MITRE Mapping:",
+        mitre_mapping.strip() if mitre_mapping else "None",
+        "",
+        "Next Steps:",
+        next_steps.strip() if next_steps else "No recommended actions."
+    ]
+    return "\n".join(parts).strip()
+
+
+def summarize_mitre_match(mitre_match: Dict[str, Any]) -> str:
+    if not mitre_match or not mitre_match.get("matched"):
+        return "No offline MITRE match found for this query."
+
+    match_type = mitre_match.get("match_type")
+    if match_type == "technique":
+        t = mitre_match.get("technique") or {}
+        tid = t.get("technique_id") or "Unknown Technique ID"
+        name = t.get("name") or "Unknown Technique"
+        tactics = t.get("tactics", [])
+        description = (t.get("description") or "")[:500]
+        mitigations = t.get("mitigations", []) or []
+        mitigation_names = [m.get("name") for m in mitigations if m.get("name")]
+        lines = [
+            f"Technique: {tid} {name}",
+            f"Tactics: {', '.join(tactics)}" if tactics else "Tactics: None listed",
+            f"Description: {description}" if description else "Description: Not available",
+            f"Mitigations: {', '.join(mitigation_names[:5])}" if mitigation_names else "Mitigations: None listed",
+            "Detection Ideas: Monitor process behavior, parent-child relationships, and suspicious command execution",
+            "Response/Mitigation: Contain affected endpoints, validate least privilege, and apply relevant mitigations"
+        ]
+        return "\n".join(lines)
+
+    if match_type == "tactic":
+        tac = mitre_match.get("tactic") or {}
+        name = tac.get("name") or "Unknown Tactic"
+        shortname = tac.get("shortname")
+        description = (tac.get("description") or "")[:500]
+        lines = [
+            f"Tactic: {name}" + (f" ({shortname})" if shortname else ""),
+            f"Description: {description}" if description else "Description: Not available",
+            "Detection Ideas: Align SIEM rules to this tactic and monitor related telemetry",
+            "Response/Mitigation: Harden controls that reduce exposure to this tactic"
+        ]
+        return "\n".join(lines)
+
+    if match_type == "group":
+        g = mitre_match.get("group") or {}
+        name = g.get("name") or "Unknown Group"
+        aliases = g.get("aliases", []) or []
+        top_techs = g.get("top_techniques", []) or []
+        tech_list = []
+        for t in top_techs[:8]:
+            tid = t.get("technique_id")
+            tname = t.get("name")
+            if tid and tname:
+                tech_list.append(f"{tid} {tname}")
+            elif tname:
+                tech_list.append(tname)
+        lines = [
+            f"Group: {name}",
+            f"Aliases: {', '.join(aliases[:5])}" if aliases else "Aliases: None listed",
+            f"Top Techniques: {', '.join(tech_list)}" if tech_list else "Top Techniques: None listed",
+            "Detection Ideas: Hunt for the group’s top techniques across endpoint and network telemetry",
+            "Response/Mitigation: Prioritize patching, access controls, and logging for mapped techniques"
+        ]
+        return "\n".join(lines)
+
+    return "Offline MITRE match found, but details are unavailable."
+
+
 # -------------------------
 # Endpoint (LLM-only) - KEEP WORKING
 # -------------------------
@@ -190,17 +290,21 @@ async def threat_intel_correlate(payload: ThreatIntelRequest, db: Session = Depe
     # ✅ Phase 5 Step 2: AI Query Classification
     classification = await ai_service.classify_query_type(query)
     qtype = classification.get("type", "analyst_question")
+    mitre_id_match = re.search(r"\bT\d{4}(?:\.\d{3})?\b", query, re.IGNORECASE)
+    if qtype not in ["unsafe_request", "out_of_scope"] and mitre_id_match:
+        qtype = "mitre_query"
 
     # ======================================================
     # (A) Unsafe Request -> Guardrail Block
     # ======================================================
     if qtype == "unsafe_request":
+        ai_summary = ai_service.cyber_guardrail_response(query)
         return {
             "query": query,
             "extracted_iocs": {"cves": [], "ips": [], "domains": [], "sha256": [], "md5": []},
             "correlated_alerts": [],
-            "external_intel": {"nvd": [], "cisa_kev": []},
-            "ai_summary": ai_service.cyber_guardrail_response(query),
+            "external_intel": {"nvd": [], "cisa_kev": [], "otx": []},
+            "ai_summary": ai_summary,
             "mitre_mapping": [],
             "recommended_actions": []
         }
@@ -209,12 +313,13 @@ async def threat_intel_correlate(payload: ThreatIntelRequest, db: Session = Depe
     # (B) Out of scope -> Refuse & redirect
     # ======================================================
     if qtype == "out_of_scope":
+        ai_summary = ai_service.out_of_scope_response(query)
         return {
             "query": query,
             "extracted_iocs": {"cves": [], "ips": [], "domains": [], "sha256": [], "md5": []},
             "correlated_alerts": [],
-            "external_intel": {"nvd": [], "cisa_kev": []},
-            "ai_summary": ai_service.out_of_scope_response(query),
+            "external_intel": {"nvd": [], "cisa_kev": [], "otx": []},
+            "ai_summary": ai_summary,
             "mitre_mapping": [],
             "recommended_actions": []
         }
@@ -226,10 +331,23 @@ async def threat_intel_correlate(payload: ThreatIntelRequest, db: Session = Depe
         mitre_match: Dict[str, Any] = {"matched": False}
         mitre_mapping: List[str] = []
 
-        try:
-            mitre_match = mitre_service.search_any(query)
-        except Exception:
-            mitre_match = {"matched": False}
+        mitre_id = mitre_id_match.group(0).upper() if mitre_id_match else None
+
+        if mitre_id:
+            try:
+                mitre_match = mitre_service.search_any(mitre_id)
+            except Exception:
+                mitre_match = {"matched": False}
+            if not mitre_match.get("matched"):
+                try:
+                    mitre_match = mitre_service.search_any(query)
+                except Exception:
+                    mitre_match = {"matched": False}
+        else:
+            try:
+                mitre_match = mitre_service.search_any(query)
+            except Exception:
+                mitre_match = {"matched": False}
 
         if mitre_match.get("matched") is True:
             if mitre_match.get("match_type") == "technique":
@@ -259,26 +377,53 @@ async def threat_intel_correlate(payload: ThreatIntelRequest, db: Session = Depe
                 if gname:
                     mitre_mapping = [gname]
 
-        ai_summary = (
-            "✅ MITRE ATT&CK Offline Match Found.\n\n"
-            f"Query: {query}\n\n"
-            f"Match Type: {mitre_match.get('match_type')}\n\n"
-            "Details:\n"
-            f"{json.dumps(mitre_match, indent=2)}"
-        )
+        mitre_summary = summarize_mitre_match(mitre_match)
+        mitre_prompt = f"""
+You are a SOC Threat Intel Analyst.
+
+User Question:
+{query}
+
+Offline MITRE Result:
+{json.dumps(mitre_match, indent=2)}
+
+STRICT RULES:
+- Use ONLY the offline MITRE data above.
+- Do NOT include UI titles like "Sentinel Intelligence Report" or query labels.
+- Output must be clean markdown text only (no code fences, no JSON).
+- Do NOT invent threat actor claims, CVEs, or techniques.
+- If no offline match, say: "Offline dataset didn’t return a match" and ask for an exact technique ID.
+- Prefer medium-to-detailed answers by default unless the user asks for a short answer.
+
+Response format:
+Short Answer:
+(2–5 lines)
+
+Then include only relevant sections:
+MITRE Summary:
+Tactics:
+Technique Details:
+Detection Ideas (SOC):
+Mitigation / Response:
+Example (realistic):
+Next Steps:
+"""
+
+        try:
+            mitre_out = await ai_service._ask_ollama(mitre_prompt)
+            mitre_out = ai_service._clean_llm_output(mitre_out).strip()
+            ai_summary = mitre_out if mitre_out else mitre_summary
+        except Exception:
+            ai_summary = mitre_summary
 
         return {
             "query": query,
             "extracted_iocs": {"cves": [], "ips": [], "domains": [], "sha256": [], "md5": []},
             "correlated_alerts": [],
-            "external_intel": {"nvd": [], "cisa_kev": []},
+            "external_intel": {"nvd": [], "cisa_kev": [], "otx": []},
             "ai_summary": ai_summary.strip(),
             "mitre_mapping": mitre_mapping,
-            "recommended_actions": [
-                "Use this MITRE technique/tactic to build SIEM detections",
-                "Map this to endpoint telemetry (Sysmon/EDR)",
-                "Create a hunt query and response playbook"
-            ]
+            "recommended_actions": []
         }
 
     # ======================================================
@@ -295,20 +440,21 @@ async def threat_intel_correlate(payload: ThreatIntelRequest, db: Session = Depe
             "mitre_match": mitre_match
         }
 
-        ai_summary = await ai_service.answer_cybersecurity_question(query, context=context)
+        try:
+            analyst_answer = await ai_service.answer_cybersecurity_question(query, context=context)
+        except Exception:
+            analyst_answer = "Not enough data to generate an AI answer right now."
+
+        ai_summary = analyst_answer
 
         return {
             "query": query,
             "extracted_iocs": {"cves": [], "ips": [], "domains": [], "sha256": [], "md5": []},
             "correlated_alerts": [],
-            "external_intel": {"nvd": [], "cisa_kev": []},
+            "external_intel": {"nvd": [], "cisa_kev": [], "otx": []},
             "ai_summary": ai_summary.strip(),
             "mitre_mapping": [],
-            "recommended_actions": [
-                "Validate this using SIEM/EDR telemetry",
-                "Add detection logic based on MITRE ATT&CK ideas",
-                "Document a response checklist for SOC"
-            ]
+            "recommended_actions": []
         }
 
     # ======================================================
@@ -369,6 +515,11 @@ async def threat_intel_correlate(payload: ThreatIntelRequest, db: Session = Depe
         if kev_data and isinstance(kev_data, dict) and kev_data.get("cve_id"):
             external_intel["cisa_kev"].append(kev_data)
 
+    try:
+        external_intel["otx"] = await intel_sources.fetch_otx_pulses(query, limit=5)
+    except Exception:
+        external_intel["otx"] = []
+
     # MITRE offline mapping (group/alias)
     mitre_mapping: List[str] = []
     try:
@@ -382,45 +533,6 @@ async def threat_intel_correlate(payload: ThreatIntelRequest, db: Session = Depe
         mitre_match = mitre_service.search_any(query)
     except Exception:
         mitre_match = {"matched": False}
-
-    # SOC-ready summary (safe rules)
-    prompt = f"""
-You are a SOC Threat Intel Correlation Analyst.
-
-STRICT RULES:
-- Only use the data provided below.
-- If external intel is empty, clearly say: "No public intel found".
-- Do NOT claim KEV exploited if it is not explicitly present.
-- Do NOT make up CVSS, vendor, exploit details.
-- If MITRE mapping exists, mention it as "MITRE ATT&CK reference".
-
-User Query:
-{query}
-
-Extracted IOCs:
-{json.dumps(extracted, indent=2)}
-
-Correlated Alerts from SOC DB:
-{json.dumps(correlated, indent=2)}
-
-External Intel Data:
-{json.dumps(external_intel, indent=2)}
-
-MITRE Match (Offline):
-{json.dumps(mitre_match, indent=2)}
-
-MITRE Mapping (Offline):
-{json.dumps(mitre_mapping, indent=2)}
-
-Write a short SOC-ready summary:
-- What is it?
-- What evidence do we have internally?
-- What does external intel confirm?
-- What does MITRE mapping suggest (if available)?
-- What should the analyst do next?
-"""
-
-    ai_summary = await ai_service._ask_ollama(prompt)
 
     recommended_actions = []
     if len(mitre_mapping) > 0:
@@ -436,6 +548,15 @@ Write a short SOC-ready summary:
             "Check WAF/IDS logs for exploit attempts",
             "Monitor for post-exploitation behavior (new users, persistence, lateral movement)"
         ]
+
+    ai_summary_raw = await ai_service.summarize_threat_intel(
+        query=query,
+        extracted_iocs=extracted,
+        correlated_alerts=correlated,
+        external_intel=external_intel
+    )
+
+    ai_summary = ai_summary_raw
 
     return {
         "query": query,

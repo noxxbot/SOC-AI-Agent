@@ -27,6 +27,12 @@ type ThreatIntelResult = {
 
 type QueryType = 'IOC' | 'MITRE' | 'ANALYST';
 
+type ReportSection = {
+  title: string;
+  paragraphs: string[];
+  items: string[];
+};
+
 const ThreatIntel: React.FC = () => {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
@@ -43,13 +49,148 @@ const ThreatIntel: React.FC = () => {
 
     cleaned = cleaned.replace(/Based on my analysis.*?:/gi, '');
 
-    const jsonStart = cleaned.indexOf('{');
-    if (jsonStart !== -1) {
-      cleaned = cleaned.substring(0, jsonStart).trim();
+    const trimmed = cleaned.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      return '';
     }
 
     return cleaned.trim();
   };
+
+  const normalizeSectionTitle = (title: string) =>
+    title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+  const isIgnoredLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return true;
+    if (/^sentinel intelligence report$/i.test(trimmed)) return true;
+    if (/^[ABC]\)\s+/i.test(trimmed)) return true;
+    return false;
+  };
+
+  const isHeadingLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^#{1,6}\s+/.test(trimmed)) return true;
+    if (trimmed.length <= 45 && /:$/.test(trimmed)) return true;
+    if (trimmed.length <= 35 && trimmed === trimmed.toUpperCase()) return true;
+    return false;
+  };
+
+  const extractHeadingTitle = (line: string) => {
+    const trimmed = line.trim();
+    if (/^#{1,6}\s+/.test(trimmed)) {
+      return trimmed.replace(/^#{1,6}\s+/, '').replace(/:$/, '').trim();
+    }
+    return trimmed.replace(/:$/, '').trim();
+  };
+
+  const parseReportSections = (text: string): ReportSection[] => {
+    const lines = text
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .filter((line) => !isIgnoredLine(line));
+
+    const sections: ReportSection[] = [];
+    const sectionMap = new Map<string, ReportSection>();
+
+    const getOrCreate = (title: string) => {
+      const key = normalizeSectionTitle(title);
+      const existing = sectionMap.get(key);
+      if (existing) return existing;
+      const section: ReportSection = { title, paragraphs: [], items: [] };
+      sectionMap.set(key, section);
+      sections.push(section);
+      return section;
+    };
+
+    let current = getOrCreate('Summary');
+    let lastKey = normalizeSectionTitle(current.title);
+
+    lines.forEach((line) => {
+      if (isHeadingLine(line)) {
+        const title = extractHeadingTitle(line);
+        const key = normalizeSectionTitle(title);
+        if (key === lastKey) return;
+        current = getOrCreate(title);
+        lastKey = key;
+        return;
+      }
+
+      const bulletMatch = line.match(/^[-*•]\s+(.*)$/);
+      const numberMatch = line.match(/^\d+\.\s+(.*)$/);
+      if (bulletMatch) {
+        current.items.push(bulletMatch[1].trim());
+        return;
+      }
+      if (numberMatch) {
+        current.items.push(numberMatch[1].trim());
+        return;
+      }
+      current.paragraphs.push(line);
+    });
+
+    return sections.filter((section) => section.items.length > 0 || section.paragraphs.length > 0);
+  };
+
+  const reportSections = useMemo(() => {
+    if (!result?.ai_summary) return [];
+    return parseReportSections(cleanSummary(result.ai_summary));
+  }, [result?.ai_summary]);
+
+  const recommendedActions = useMemo(() => {
+    const actionSectionMatcher = /(recommended actions|recommended|mitigation|response|remediation|next steps|actions)/i;
+    const fromSummary = reportSections
+      .filter((section) => actionSectionMatcher.test(section.title))
+      .flatMap((section) => [...section.items, ...section.paragraphs]);
+    const fromPayload = result?.recommended_actions || [];
+    const seen = new Set<string>();
+    const combined = [...fromPayload, ...fromSummary].filter((action) => {
+      const normalized = action.trim().toLowerCase();
+      if (!normalized) return false;
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+    return combined;
+  }, [reportSections, result?.recommended_actions]);
+
+  const internalEvidenceItems = useMemo(() => {
+    const section = reportSections.find((entry) => /internal evidence/i.test(entry.title));
+    if (section) {
+      return [...section.paragraphs, ...section.items].filter((item) => item.trim().length > 0);
+    }
+    if (result?.correlated_alerts?.length) {
+      const titles = result.correlated_alerts
+        .slice(0, 3)
+        .map((alert) => alert?.title)
+        .filter(Boolean);
+      const items = [`Correlated alerts: ${result.correlated_alerts.length}`];
+      if (titles.length > 0) {
+        items.push(...titles);
+      }
+      return items;
+    }
+    return [];
+  }, [reportSections, result?.correlated_alerts]);
+
+  const mitreItems = useMemo(() => {
+    if (result?.mitre_mapping?.length) {
+      return result.mitre_mapping.map((item) => String(item));
+    }
+    const section = reportSections.find((entry) => /mitre summary|mitre mapping/i.test(entry.title));
+    if (section) {
+      return [...section.paragraphs, ...section.items].filter((item) => item.trim().length > 0);
+    }
+    return [];
+  }, [reportSections, result?.mitre_mapping]);
+
+  const displaySections = useMemo(() => {
+    const actionSectionMatcher =
+      /(recommended actions|recommended|mitigation|response|remediation|next steps|actions|internal evidence|mitre summary|mitre mapping)/i;
+    return reportSections.filter((section) => !actionSectionMatcher.test(section.title));
+  }, [reportSections]);
 
   // =========================================================
   // Phase 5 Step 4: Query Type Detection (Frontend)
@@ -184,35 +325,93 @@ const ThreatIntel: React.FC = () => {
               </div>
             </div>
 
-            <div className="prose prose-invert max-w-none prose-emerald">
-              {cleanSummary(result.ai_summary || 'No AI summary available')
-                .split('\n')
-                .map((line, i) => (
-                  <p key={i} className="text-slate-300 leading-relaxed mb-4">
-                    {line}
-                  </p>
-                ))}
+            <div className="space-y-5">
+              {displaySections.map((section, sectionIndex) => (
+                <div
+                  key={`${section.title}-${sectionIndex}`}
+                  className="bg-slate-950/40 border border-slate-800 rounded-2xl p-5"
+                >
+                  <div className="text-xs font-bold text-slate-400 uppercase tracking-[0.2em] mb-3">
+                    {section.title}
+                  </div>
+                  <div className="space-y-3">
+                    {section.paragraphs.map((paragraph, paragraphIndex) => (
+                      <p key={paragraphIndex} className="text-slate-300 leading-relaxed">
+                        {paragraph}
+                      </p>
+                    ))}
+                    {section.items.length > 0 && (
+                      <ul className="space-y-2">
+                        {section.items.map((item, itemIndex) => (
+                          <li key={itemIndex} className="flex gap-2 text-slate-300">
+                            <span className="text-emerald-400">•</span>
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 
-          {/* Optional: show recommended actions */}
-          {result.recommended_actions?.length > 0 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
-              <h4 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">
-                Recommended Actions
-              </h4>
+          {recommendedActions.length > 0 && (
+            <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-6 shadow-inner">
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <h4 className="text-sm font-bold text-emerald-300 uppercase tracking-widest">
+                  Recommended Actions
+                </h4>
+                <span className="text-xs text-emerald-300/70 bg-emerald-500/10 border border-emerald-500/30 px-3 py-1 rounded-full">
+                  {recommendedActions.length} Actions
+                </span>
+              </div>
 
-              <ul className="space-y-2">
-                {result.recommended_actions.map((action, i) => (
-                  <li key={i} className="text-slate-300">
-                    ✅ {action}
+              <ul className="grid gap-3">
+                {recommendedActions.map((action, i) => (
+                  <li key={i} className="flex items-start gap-3 text-slate-200">
+                    <span className="h-6 w-6 flex items-center justify-center rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
+                      {i + 1}
+                    </span>
+                    <span className="leading-relaxed">{action}</span>
                   </li>
                 ))}
               </ul>
             </div>
           )}
 
-          {/* Extracted IOCs */}
+          {internalEvidenceItems.length > 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+              <h4 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">
+                Internal Evidence
+              </h4>
+              <ul className="space-y-2 text-slate-300">
+                {internalEvidenceItems.map((item, index) => (
+                  <li key={index} className="flex gap-2">
+                    <span className="text-emerald-400">•</span>
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {mitreItems.length > 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+              <h4 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">
+                MITRE Mapping
+              </h4>
+              <ul className="space-y-2 text-slate-300">
+                {mitreItems.map((item, index) => (
+                  <li key={index} className="flex gap-2">
+                    <span className="text-indigo-300">•</span>
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {result.extracted_iocs && (
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
               <h4 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">
@@ -239,22 +438,6 @@ const ThreatIntel: React.FC = () => {
             </div>
           )}
 
-          {/* MITRE Mapping */}
-          {result.mitre_mapping?.length > 0 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
-              <h4 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">
-                MITRE ATT&CK Mapping
-              </h4>
-
-              <ul className="space-y-2">
-                {result.mitre_mapping.map((m, i) => (
-                  <li key={i} className="text-slate-300">
-                    🎯 {String(m)}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
         </div>
       )}
 
