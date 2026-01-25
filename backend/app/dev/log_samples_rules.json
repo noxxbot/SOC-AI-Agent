@@ -1,0 +1,228 @@
+{
+  "agent_id": "rule-agent-001",
+  "hostname": "RULE-HOST-1",
+  "timestamp": "2026-01-25T00:00:00Z",
+  "telemetry": {},
+  "logs": [
+    {
+      "event_id": "rule-001",
+      "timestamp": "2026-01-25T00:00:01Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-1",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.10 port 55212 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "rule-002",
+      "timestamp": "2026-01-25T00:00:10Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-1",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.10 port 55213 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "rule-003",
+      "timestamp": "2026-01-25T00:00:20Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-1",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.10 port 55214 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "rule-004",
+      "timestamp": "2026-01-25T00:00:30Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-1",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.10 port 55215 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "rule-005",
+      "timestamp": "2026-01-25T00:00:40Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-1",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.10 port 55216 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "rule-006",
+      "timestamp": "2026-01-25T00:00:45Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-1",
+      "log_source": "endpoint",
+      "event_type": "process_start",
+      "severity_raw": "high",
+      "raw": "powershell -enc SQBFAFgA",
+      "fields": { "process_name": "powershell.exe", "command_line": "powershell -enc SQBFAFgA" }
+    },
+    {
+      "event_id": "rule-007",
+      "timestamp": "2026-01-25T00:00:50Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-1",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for suspicious.example.com",
+      "fields": { "query": "suspicious.example.com" }
+    },
+    {
+      "event_id": "rule-008",
+      "timestamp": "2026-01-25T00:00:52Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for a1b2c3d4e5f6g7h8i9j0.example.com",
+      "fields": { "query": "a1b2c3d4e5f6g7h8i9j0.example.com" }
+    },
+    {
+      "event_id": "rule-009",
+      "timestamp": "2026-01-25T00:00:53Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for b2c3d4e5f6g7h8i9j0k1.example.com",
+      "fields": { "query": "b2c3d4e5f6g7h8i9j0k1.example.com" }
+    },
+    {
+      "event_id": "rule-010",
+      "timestamp": "2026-01-25T00:00:54Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for c3d4e5f6g7h8i9j0k1l2.example.com",
+      "fields": { "query": "c3d4e5f6g7h8i9j0k1l2.example.com" }
+    },
+    {
+      "event_id": "rule-011",
+      "timestamp": "2026-01-25T00:00:55Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for d4e5f6g7h8i9j0k1l2m3.example.com",
+      "fields": { "query": "d4e5f6g7h8i9j0k1l2m3.example.com" }
+    },
+    {
+      "event_id": "rule-012",
+      "timestamp": "2026-01-25T00:00:56Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for e5f6g7h8i9j0k1l2m3n4.example.com",
+      "fields": { "query": "e5f6g7h8i9j0k1l2m3n4.example.com" }
+    },
+    {
+      "event_id": "rule-013",
+      "timestamp": "2026-01-25T00:00:57Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for f6g7h8i9j0k1l2m3n4o5.example.com",
+      "fields": { "query": "f6g7h8i9j0k1l2m3n4o5.example.com" }
+    },
+    {
+      "event_id": "rule-014",
+      "timestamp": "2026-01-25T00:00:58Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for g7h8i9j0k1l2m3n4o5p6.example.com",
+      "fields": { "query": "g7h8i9j0k1l2m3n4o5p6.example.com" }
+    },
+    {
+      "event_id": "rule-015",
+      "timestamp": "2026-01-25T00:00:59Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for h8i9j0k1l2m3n4o5p6q7.example.com",
+      "fields": { "query": "h8i9j0k1l2m3n4o5p6q7.example.com" }
+    },
+    {
+      "event_id": "rule-016",
+      "timestamp": "2026-01-25T00:01:00Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for i9j0k1l2m3n4o5p6q7r8.example.com",
+      "fields": { "query": "i9j0k1l2m3n4o5p6q7r8.example.com" }
+    },
+    {
+      "event_id": "rule-017",
+      "timestamp": "2026-01-25T00:01:01Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for j0k1l2m3n4o5p6q7r8s9.example.com",
+      "fields": { "query": "j0k1l2m3n4o5p6q7r8s9.example.com" }
+    },
+    {
+      "event_id": "rule-018",
+      "timestamp": "2026-01-25T00:01:02Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-2",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for k1l2m3n4o5p6q7r8s9t0.example.com",
+      "fields": { "query": "k1l2m3n4o5p6q7r8s9t0.example.com" }
+    },
+    {
+      "event_id": "rule-019",
+      "timestamp": "2026-01-25T00:01:05Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-3",
+      "log_source": "network",
+      "event_type": "net_conn",
+      "severity_raw": "high",
+      "raw": "connection to 203.0.113.66:443",
+      "fields": { "remote_ip": "203.0.113.66", "remote_port": 443, "protocol": "tcp" }
+    },
+    {
+      "event_id": "rule-020",
+      "timestamp": "2026-01-25T00:01:10Z",
+      "agent_id": "rule-agent-001",
+      "hostname": "RULE-HOST-3",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for dns.google",
+      "fields": { "query": "dns.google", "resolved_ip": "8.8.8.8" }
+    }
+  ]
+}

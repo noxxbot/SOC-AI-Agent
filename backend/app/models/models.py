@@ -37,3 +37,36 @@ class Alert(Base):
     description = Column(Text)
     evidence_json = Column(JSON)
     status = Column(String, default="OPEN") # OPEN, INVESTIGATING, RESOLVED
+
+class EndpointLog(Base):
+    __tablename__ = "endpoint_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(String, unique=True, index=True, nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    agent_id = Column(String, index=True, nullable=False)
+    hostname = Column(String)
+    log_source = Column(String, index=True)
+    event_type = Column(String, index=True)
+    severity_raw = Column(String)
+    raw = Column(Text)
+    fields_json = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class ProcessedLog(Base):
+    __tablename__ = "processed_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    agent_id = Column(String, index=True, nullable=False, default="unknown")
+    hostname = Column(String, default="unknown")
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    category = Column(String, index=True, default="other")
+    event_type = Column(String, index=True, default="other")
+    severity_score = Column(Integer, default=0)
+    message = Column(Text)
+    raw = Column(Text)
+    fields_json = Column(Text)
+    iocs_json = Column(Text)
+    tags_json = Column(Text)
+    fingerprint = Column(String, index=True, unique=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

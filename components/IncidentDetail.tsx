@@ -1,7 +1,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { Incident, Severity, Playbook, AnalysisResult, BriefingResult, Telemetry, CorrelationResult } from '../types';
-import { getPlaybookSuggestions, generateTacticalBriefing, analyzeLog, correlateIncidentContext } from '../services/gemini';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer } from 'recharts';
 import { api } from '../services/api';
 
@@ -9,6 +8,79 @@ interface IncidentDetailProps {
   incident: Incident;
   onBack: () => void;
 }
+
+const normalizeVectorValue = (value: unknown) => {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'boolean') return value ? 80 : 15;
+  return 0;
+};
+
+const buildBriefingResult = (analysis: AnalysisResult, incident: Incident): BriefingResult => {
+  const briefParts = [
+    incident.title ? `Incident focus: ${incident.title}` : null,
+    incident.summary ? incident.summary : null,
+    analysis.explanation ? analysis.explanation : null
+  ].filter(Boolean);
+
+  if (analysis.recommendations?.length) {
+    briefParts.push(`Recommended actions:\n${analysis.recommendations.slice(0, 6).map((rec, idx) => `${idx + 1}. ${rec}`).join('\n')}`);
+  }
+
+  const vectors = analysis.threatVectors || {
+    persistence: 0,
+    lateralMovement: 0,
+    exfiltration: 0,
+    reconnaissance: 0,
+    credentialAccess: 0
+  };
+
+  return {
+    brief: briefParts.join('\n'),
+    vectors: {
+      persistence: normalizeVectorValue(vectors.persistence),
+      lateralMovement: normalizeVectorValue(vectors.lateralMovement),
+      exfiltration: normalizeVectorValue(vectors.exfiltration),
+      reconnaissance: normalizeVectorValue(vectors.reconnaissance),
+      credentialAccess: normalizeVectorValue(vectors.credentialAccess)
+    }
+  };
+};
+
+const buildPlaybooks = (analysis: AnalysisResult, incident: Incident): Playbook[] => {
+  if (!analysis.recommendations || analysis.recommendations.length === 0) return [];
+  const steps = analysis.recommendations.slice(0, 6).map((rec, idx) => ({
+    title: `Step ${idx + 1}`,
+    action: rec
+  }));
+
+  return [
+    {
+      name: incident.title ? `${incident.title} Response` : 'Incident Response Playbook',
+      objective: incident.summary || 'Contain and remediate the incident.',
+      steps
+    }
+  ];
+};
+
+const buildCorrelationResult = (incident: Incident, relatedAlerts: Incident[], telemetry: Telemetry[]): CorrelationResult => {
+  const alertCount = relatedAlerts.length;
+  const telemetryCount = telemetry.length;
+  const avgCpu = telemetryCount ? telemetry.reduce((sum, item) => sum + item.cpu_percent, 0) / telemetryCount : 0;
+  const avgRam = telemetryCount ? telemetry.reduce((sum, item) => sum + item.ram_percent, 0) / telemetryCount : 0;
+  const signalScore = Math.min(100, 35 + alertCount * 12 + Math.round((avgCpu + avgRam) / 4));
+
+  const insights = [];
+  if (alertCount > 0) insights.push(`${alertCount} related alerts observed for the same agent.`);
+  if (telemetryCount > 0) insights.push(`Telemetry shows average CPU ${Math.round(avgCpu)}% and RAM ${Math.round(avgRam)}%.`);
+  if (incident.summary) insights.push(`Incident summary indicates: ${incident.summary}`);
+  if (relatedAlerts[0]?.title) insights.push(`Most recent related alert: ${relatedAlerts[0].title}.`);
+
+  return {
+    summary: `Correlation synthesized from ${alertCount} related alerts and ${telemetryCount} telemetry records.`,
+    relationshipScore: signalScore,
+    keyInsights: insights.length ? insights : ['No additional context available for correlation.']
+  };
+};
 
 const IncidentDetail: React.FC<IncidentDetailProps> = ({ incident, onBack }) => {
   const [activeSubTab, setActiveSubTab] = useState<'overview' | 'holistic' | 'logs'>('overview');
@@ -33,8 +105,11 @@ const IncidentDetail: React.FC<IncidentDetailProps> = ({ incident, onBack }) => 
     const fetchBrief = async () => {
       setLoadingBrief(true);
       try {
-        const result = await generateTacticalBriefing(incident);
-        setBriefingResult(result);
+        const briefInput = [incident.title, incident.summary, incident.source, incident.agentId, incident.agent_id]
+          .filter(Boolean)
+          .join('\n');
+        const analysis = await api.analyzeLogs(briefInput || 'Incident briefing request');
+        setBriefingResult(buildBriefingResult(analysis, incident));
       } catch (e) {
         console.error("Brief generation failed", e);
       } finally {
@@ -54,18 +129,18 @@ const IncidentDetail: React.FC<IncidentDetailProps> = ({ incident, onBack }) => 
   const handleFetchCorrelation = async () => {
     setLoadingCorrelation(true);
     try {
+      const agentId = incident.agentId || incident.agent_id;
       const [allAlerts, telemetry] = await Promise.all([
         api.getAlerts(),
-        api.getTelemetry(incident.agentId, 30)
+        agentId ? api.getTelemetry(agentId, 30) : Promise.resolve([])
       ]);
 
       // Filter alerts for same agent, excluding the current one
-      const agentAlerts = allAlerts.filter(a => a.agentId === incident.agentId && a.id !== incident.id);
+      const agentAlerts = agentId ? allAlerts.filter(a => a.agentId === agentId && a.id !== incident.id) : [];
       setRelatedAlerts(agentAlerts);
       setRelatedTelemetry(telemetry);
 
-      const correlation = await correlateIncidentContext(incident, agentAlerts, telemetry);
-      setCorrelationResult(correlation);
+      setCorrelationResult(buildCorrelationResult(incident, agentAlerts, telemetry));
     } catch (error) {
       console.error("Correlation fetch error:", error);
     } finally {
@@ -86,8 +161,11 @@ const IncidentDetail: React.FC<IncidentDetailProps> = ({ incident, onBack }) => 
   const handleGeneratePlaybooks = async () => {
     setLoadingPlaybooks(true);
     try {
-      const suggestions = await getPlaybookSuggestions(incident);
-      setPlaybooks(suggestions);
+      const prompt = [incident.title, incident.summary, incident.source, incident.agentId, incident.agent_id]
+        .filter(Boolean)
+        .join('\n');
+      const analysis = await api.analyzeLogs(prompt || 'Incident playbook generation request');
+      setPlaybooks(buildPlaybooks(analysis, incident));
     } catch (error) {
       console.error(error);
       alert('Failed to generate playbooks.');
@@ -101,7 +179,7 @@ const IncidentDetail: React.FC<IncidentDetailProps> = ({ incident, onBack }) => 
     setAnalyzingLogs(true);
     setCompletedLogTasks([]);
     try {
-      const result = await analyzeLog(evidenceLogs);
+      const result = await api.analyzeLogs(evidenceLogs);
       setLogAnalysisResult(result);
     } catch (error) {
       console.error(error);
@@ -133,7 +211,9 @@ const IncidentDetail: React.FC<IncidentDetailProps> = ({ incident, onBack }) => 
     { subject: 'Cred Access', A: logAnalysisResult.threatVectors.credentialAccess, fullMark: 100 },
   ] : [];
 
-  const logCompletionRate = logAnalysisResult ? Math.round((completedLogTasks.length / logAnalysisResult.recommendations.length) * 100) : 0;
+  const logCompletionRate = logAnalysisResult && logAnalysisResult.recommendations.length
+    ? Math.round((completedLogTasks.length / logAnalysisResult.recommendations.length) * 100)
+    : 0;
 
   return (
     <div className="space-y-6 max-w-6xl mx-auto animate-in fade-in slide-in-from-right-4 duration-300 pb-20">

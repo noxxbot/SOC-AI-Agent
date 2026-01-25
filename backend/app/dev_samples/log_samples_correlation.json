@@ -1,0 +1,129 @@
+{
+  "agent_id": "endpoint-002",
+  "hostname": "LINUX-TEST",
+  "timestamp": "2026-01-24T01:00:00Z",
+  "telemetry": {},
+  "logs": [
+    {
+      "event_id": "corr-001",
+      "timestamp": "2026-01-24T00:59:10Z",
+      "agent_id": "endpoint-002",
+      "hostname": "LINUX-TEST",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.10 port 55212 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "corr-002",
+      "timestamp": "2026-01-24T00:59:15Z",
+      "agent_id": "endpoint-002",
+      "hostname": "LINUX-TEST",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.10 port 55213 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "corr-003",
+      "timestamp": "2026-01-24T00:59:20Z",
+      "agent_id": "endpoint-002",
+      "hostname": "LINUX-TEST",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.10 port 55214 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "corr-004",
+      "timestamp": "2026-01-24T00:59:25Z",
+      "agent_id": "endpoint-002",
+      "hostname": "LINUX-TEST",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.10 port 55215 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "corr-005",
+      "timestamp": "2026-01-24T00:59:30Z",
+      "agent_id": "endpoint-002",
+      "hostname": "LINUX-TEST",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.10 port 55216 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "corr-006",
+      "timestamp": "2026-01-24T00:59:50Z",
+      "agent_id": "endpoint-002",
+      "hostname": "LINUX-TEST",
+      "log_source": "auth",
+      "event_type": "login_success",
+      "severity_raw": "high",
+      "raw": "Accepted password for root from 203.0.113.10 port 55220 ssh2",
+      "fields": { "user": "root", "source_ip": "203.0.113.10", "protocol": "ssh" }
+    },
+    {
+      "event_id": "corr-007",
+      "timestamp": "2026-01-24T00:59:40Z",
+      "agent_id": "endpoint-002",
+      "hostname": "WIN-TEST",
+      "log_source": "endpoint",
+      "event_type": "process_start",
+      "severity_raw": "warn",
+      "raw": "powershell -enc SQBFAFgA",
+      "fields": { "process_name": "powershell.exe", "command_line": "powershell -enc SQBFAFgA" }
+    },
+    {
+      "event_id": "corr-008",
+      "timestamp": "2026-01-24T00:59:45Z",
+      "agent_id": "endpoint-002",
+      "hostname": "WIN-TEST",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for suspicious.example.com",
+      "fields": { "query": "suspicious.example.com" }
+    },
+    {
+      "event_id": "corr-009",
+      "timestamp": "2026-01-24T00:59:55Z",
+      "agent_id": "endpoint-002",
+      "hostname": "WIN-TEST",
+      "log_source": "network",
+      "event_type": "net_conn",
+      "severity_raw": "info",
+      "raw": "http connection to 198.51.100.10:443",
+      "fields": { "remote_ip": "198.51.100.10", "remote_port": 443, "protocol": "tcp" }
+    },
+    {
+      "event_id": "corr-010",
+      "timestamp": "2026-01-24T00:59:00Z",
+      "agent_id": "endpoint-002",
+      "hostname": "DNS-TEST",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for dns.google",
+      "fields": { "query": "dns.google", "resolved_ip": "8.8.8.8" }
+    },
+    {
+      "event_id": "corr-011",
+      "timestamp": "2026-01-24T00:59:05Z",
+      "agent_id": "endpoint-002",
+      "hostname": "APP-TEST",
+      "log_source": "system",
+      "event_type": "info",
+      "severity_raw": "info",
+      "raw": "system heartbeat ok",
+      "fields": { "uptime_seconds": 7200 }
+    }
+  ]
+}

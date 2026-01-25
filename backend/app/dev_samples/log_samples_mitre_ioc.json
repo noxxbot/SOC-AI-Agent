@@ -1,0 +1,118 @@
+{
+  "agent_id": "endpoint-001",
+  "hostname": "pc-1",
+  "timestamp": "2026-01-24T00:00:00Z",
+  "telemetry": {},
+  "logs": [
+    {
+      "event_id": "sample-001",
+      "timestamp": "2026-01-24T00:00:01Z",
+      "agent_id": "endpoint-001",
+      "hostname": "pc-1",
+      "log_source": "endpoint",
+      "event_type": "process_start",
+      "severity_raw": "warn",
+      "raw": "powershell -enc SQBFAFgAIAAtAFMAdABhAHIAdABQAHIAbwBjAGUAcwBzAA==",
+      "fields": {
+        "process_name": "powershell.exe",
+        "command_line": "powershell -enc SQBFAFgAIAAtAFMAdABhAHIAdABQAHIAbwBjAGUAcwBzAA=="
+      }
+    },
+    {
+      "event_id": "sample-002",
+      "timestamp": "2026-01-24T00:00:05Z",
+      "agent_id": "endpoint-001",
+      "hostname": "pc-1",
+      "log_source": "auth",
+      "event_type": "login_failed",
+      "severity_raw": "medium",
+      "raw": "Failed password for root from 203.0.113.50 port 55212 ssh2",
+      "fields": {
+        "user": "root",
+        "source_ip": "203.0.113.50",
+        "protocol": "ssh"
+      }
+    },
+    {
+      "event_id": "sample-003",
+      "timestamp": "2026-01-24T00:00:08Z",
+      "agent_id": "endpoint-001",
+      "hostname": "pc-1",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for verylongsubdomain.dns_tunnel.example.com",
+      "fields": {
+        "query": "verylongsubdomain.dns_tunnel.example.com"
+      }
+    },
+    {
+      "event_id": "sample-004",
+      "timestamp": "2026-01-24T00:00:12Z",
+      "agent_id": "endpoint-001",
+      "hostname": "pc-1",
+      "log_source": "network",
+      "event_type": "net_conn",
+      "severity_raw": "info",
+      "raw": "beacon http connection to 198.51.100.10:443",
+      "fields": {
+        "remote_ip": "198.51.100.10",
+        "remote_port": 443,
+        "protocol": "tcp"
+      }
+    },
+    {
+      "event_id": "sample-005",
+      "timestamp": "2026-01-24T00:00:20Z",
+      "agent_id": "endpoint-001",
+      "hostname": "pc-1",
+      "log_source": "endpoint",
+      "event_type": "file_write",
+      "severity_raw": "info",
+      "raw": "file hash observed: 275a021bbfb6489e54d471899f7db9d17f6303f5a8a1c2b04d6c0a3c1fd1e4a2",
+      "fields": {
+        "sha256": "275a021bbfb6489e54d471899f7db9d17f6303f5a8a1c2b04d6c0a3c1fd1e4a2"
+      }
+    },
+    {
+      "event_id": "sample-006",
+      "timestamp": "2026-01-24T00:00:25Z",
+      "agent_id": "endpoint-001",
+      "hostname": "pc-1",
+      "log_source": "app",
+      "event_type": "vuln_detected",
+      "severity_raw": "medium",
+      "raw": "scanner found CVE-2023-12345 in package",
+      "fields": {
+        "cve": "CVE-2023-12345"
+      }
+    },
+    {
+      "event_id": "sample-007",
+      "timestamp": "2026-01-24T00:00:30Z",
+      "agent_id": "endpoint-001",
+      "hostname": "pc-1",
+      "log_source": "network",
+      "event_type": "dns_query",
+      "severity_raw": "info",
+      "raw": "dns query for dns.google",
+      "fields": {
+        "query": "dns.google",
+        "resolved_ip": "8.8.8.8"
+      }
+    },
+    {
+      "event_id": "sample-008",
+      "timestamp": "2026-01-24T00:00:35Z",
+      "agent_id": "endpoint-001",
+      "hostname": "pc-1",
+      "log_source": "system",
+      "event_type": "info",
+      "severity_raw": "info",
+      "raw": "system heartbeat ok",
+      "fields": {
+        "uptime_seconds": 3600
+      }
+    }
+  ]
+}

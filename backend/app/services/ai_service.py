@@ -169,6 +169,353 @@ class AIService:
 
         return explanation_text
 
+    def _word_count(self, text: str) -> int:
+        return len([w for w in re.split(r"\s+", text or "") if w.strip()])
+
+    def _coerce_list(self, value: Any) -> List[str]:
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if value is None:
+            return []
+        value = str(value).strip()
+        return [value] if value else []
+
+    def _normalize_risk_level(self, value: Any) -> str:
+        level = str(value or "low").strip().lower()
+        if level not in {"low", "medium", "high", "critical"}:
+            return "low"
+        return level
+
+    def _derive_log_signals(self, log: Dict[str, Any]) -> Dict[str, Any]:
+        fields = log.get("fields") or {}
+        tags = log.get("tags") or []
+        mitre_matches = fields.get("mitre_matches") or log.get("mitre_matches") or []
+        ioc_intel = fields.get("ioc_intel") or log.get("ioc_intel") or {}
+        ioc_summary = ioc_intel.get("ioc_summary") or {}
+        ioc_matches = ioc_intel.get("ioc_matches") or []
+        ioc_risk = str(ioc_summary.get("risk") or "unknown").lower()
+        try:
+            ioc_confidence = int(ioc_summary.get("confidence") or 0)
+        except Exception:
+            ioc_confidence = 0
+        allowlist_benign = ioc_risk == "benign"
+        if ioc_matches:
+            verdicts = [str(m.get("verdict") or "").lower() for m in ioc_matches]
+            if verdicts and all(v == "benign" for v in verdicts):
+                allowlist_benign = True
+
+        suspicious_tag_set = {
+            "powershell",
+            "encoded_command",
+            "rundll32",
+            "regsvr32",
+            "certutil",
+            "wmic",
+            "schtasks"
+        }
+        suspicious_tags = []
+        for tag in tags:
+            tag_value = str(tag or "").strip().lower()
+            if not tag_value:
+                continue
+            if tag_value in suspicious_tag_set or tag_value.startswith("mitre:") or tag_value.startswith("ioc:"):
+                suspicious_tags.append(tag_value)
+
+        try:
+            severity_score = int(log.get("severity_score") or 0)
+        except Exception:
+            severity_score = 0
+
+        mitre_ids = []
+        for match in mitre_matches:
+            if not isinstance(match, dict):
+                continue
+            tid = str(match.get("technique_id") or match.get("id") or "").strip()
+            name = str(match.get("technique_name") or match.get("name") or "").strip()
+            if tid:
+                mitre_ids.append({"technique_id": tid, "name": name})
+
+        return {
+            "severity_score": severity_score,
+            "mitre_matches": mitre_matches,
+            "mitre_ids": mitre_ids,
+            "ioc_intel": ioc_intel,
+            "ioc_summary": ioc_summary,
+            "ioc_matches": ioc_matches,
+            "ioc_risk": ioc_risk,
+            "ioc_confidence": ioc_confidence,
+            "allowlist_benign": allowlist_benign,
+            "suspicious_tags": suspicious_tags
+        }
+
+    def _score_log_confidence(self, signals: Dict[str, Any]) -> int:
+        severity_score = int(signals.get("severity_score") or 0)
+        ioc_risk = str(signals.get("ioc_risk") or "unknown").lower()
+        mitre_matches = signals.get("mitre_matches") or []
+        suspicious_tags = signals.get("suspicious_tags") or []
+        allowlist_benign = bool(signals.get("allowlist_benign"))
+
+        score = 15
+        if severity_score >= 60:
+            score += 20
+        if severity_score >= 80:
+            score += 15
+        if mitre_matches:
+            score += 20
+        if ioc_risk in {"suspicious", "malicious"}:
+            score += 25
+        if suspicious_tags:
+            score += 10
+        if ioc_risk == "malicious":
+            score += 10
+
+        major = 0
+        if severity_score >= 80:
+            major += 1
+        if mitre_matches:
+            major += 1
+        if ioc_risk in {"suspicious", "malicious"}:
+            major += 1
+
+        if allowlist_benign:
+            score = min(score, 30)
+        if major < 2 and score > 75:
+            score = 70
+        if not (mitre_matches or ioc_risk in {"suspicious", "malicious"} or severity_score >= 60 or suspicious_tags):
+            score = min(score, 40)
+
+        return int(max(0, min(100, score)))
+
+    def _risk_level_from_score(self, score: int, signals: Dict[str, Any]) -> str:
+        if signals.get("allowlist_benign"):
+            return "low"
+        ioc_risk = str(signals.get("ioc_risk") or "unknown").lower()
+        severity_score = int(signals.get("severity_score") or 0)
+        if ioc_risk == "malicious" and score >= 85:
+            return "critical"
+        if score >= 85 or severity_score >= 90:
+            return "high"
+        if score >= 55 or severity_score >= 60:
+            return "medium"
+        return "low"
+
+    def _build_explainability(self, log: Dict[str, Any], signals: Dict[str, Any]) -> List[str]:
+        items: List[str] = []
+        severity_score = int(signals.get("severity_score") or 0)
+        ioc_risk = str(signals.get("ioc_risk") or "unknown").lower()
+        ioc_confidence = int(signals.get("ioc_confidence") or 0)
+        suspicious_tags = signals.get("suspicious_tags") or []
+        mitre_ids = signals.get("mitre_ids") or []
+        allowlist_benign = bool(signals.get("allowlist_benign"))
+
+        if severity_score >= 60:
+            items.append(f"Severity score {severity_score} indicates elevated risk")
+        if mitre_ids:
+            for match in mitre_ids[:3]:
+                tid = match.get("technique_id")
+                name = match.get("name")
+                if name:
+                    items.append(f"Matched MITRE technique {tid} {name}")
+                else:
+                    items.append(f"Matched MITRE technique {tid}")
+        if "encoded_command" in suspicious_tags:
+            items.append("PowerShell execution with encoded command detected (tag: encoded_command)")
+        if "powershell" in suspicious_tags and "encoded_command" not in suspicious_tags:
+            items.append("PowerShell execution observed (tag: powershell)")
+        for tag in ["rundll32", "regsvr32", "certutil", "wmic", "schtasks"]:
+            if tag in suspicious_tags:
+                items.append(f"Living-off-the-land binary usage observed (tag: {tag})")
+        if ioc_risk in {"suspicious", "malicious"}:
+            items.append(f"IOC intel risk is {ioc_risk} (confidence {ioc_confidence})")
+        if allowlist_benign:
+            items.append("IOC matched offline allowlist and is considered benign")
+        if not items:
+            items.append("No strong suspicious indicators observed in available fields")
+
+        return items
+
+    def _build_recommended_actions(self, log: Dict[str, Any], signals: Dict[str, Any]) -> List[str]:
+        if signals.get("allowlist_benign"):
+            return ["No action required (benign indicator confirmed)"]
+
+        actions: List[str] = []
+        tags = signals.get("suspicious_tags") or []
+        event_type = str(log.get("event_type") or "").lower()
+        category = str(log.get("category") or "").lower()
+        ioc_risk = str(signals.get("ioc_risk") or "unknown").lower()
+
+        if "encoded_command" in tags or "powershell" in tags:
+            actions.extend([
+                "Review process ancestry and parent-child relationships",
+                "Check command line arguments and script content",
+                "Collect Sysmon EventID 1 and Windows 4688 for validation"
+            ])
+        if event_type in {"login_failed", "failed_login"} or "login_failed" in event_type or category in {"auth", "authentication"}:
+            actions.extend([
+                "Review failed login trends for the user and source",
+                "Block the source IP if confirmed malicious",
+                "Enforce or verify MFA for the affected account"
+            ])
+        if "dns" in event_type or event_type == "dns_query" or category == "network":
+            actions.extend([
+                "Check DNS logs for repetition and additional queries",
+                "Review outbound connections to the resolved destination",
+                "Consider sinkholing or blocking the domain if confirmed suspicious"
+            ])
+        if ioc_risk in {"suspicious", "malicious"}:
+            actions.extend([
+                "Block the suspicious indicator in perimeter controls",
+                "Hunt for related activity across endpoints"
+            ])
+
+        if not actions:
+            actions.extend([
+                "Collect additional endpoint telemetry around the event",
+                "Validate user and host context for anomalies",
+                "Monitor for follow-on activity tied to the same agent or host"
+            ])
+
+        unique_actions = []
+        seen = set()
+        for action in actions:
+            if action not in seen:
+                seen.add(action)
+                unique_actions.append(action)
+        return unique_actions[:6]
+
+    def _fallback_case_notes(self, log: Dict[str, Any], explainability: List[str], risk_level: str) -> str:
+        timestamp = str(log.get("timestamp") or "unknown time")
+        agent_id = str(log.get("agent_id") or "unknown agent")
+        hostname = str(log.get("hostname") or "unknown host")
+        event_type = str(log.get("event_type") or "unknown event")
+        category = str(log.get("category") or "other")
+        message = str(log.get("message") or "").strip()
+        iocs = log.get("iocs") or {}
+        ioc_values = []
+        for key in ["ips", "domains", "sha256", "md5", "cves"]:
+            values = iocs.get(key) or []
+            for val in values[:3]:
+                ioc_values.append(str(val))
+        ioc_text = ", ".join(ioc_values) if ioc_values else "no confirmed indicators"
+        mitre_matches = (log.get("fields") or {}).get("mitre_matches") or log.get("mitre_matches") or []
+        mitre_text = ", ".join([str(m.get("technique_id") or "") for m in mitre_matches if isinstance(m, dict)]) or "no MITRE techniques observed"
+
+        sentences = [
+            f"At {timestamp}, agent {agent_id} on host {hostname} reported a {event_type} event in the {category} category.",
+            f"Observed message context includes: {message}" if message else "Observed message context was limited to the available log fields.",
+            f"IOC extraction yielded {ioc_text}, and MITRE mapping shows {mitre_text}.",
+            f"The current risk level is assessed as {risk_level} based on the evidence captured in this log.",
+            "This assessment is derived strictly from available fields and does not assume additional activity beyond the recorded event.",
+        ]
+        if explainability:
+            sentences.append("Key reasons include: " + "; ".join(explainability[:4]) + ".")
+
+        text = " ".join(sentences)
+        while self._word_count(text) < 80:
+            text = text + " Additional telemetry, process lineage, and adjacent network events should be reviewed to confirm scope and intent without assuming maliciousness."
+        words = self._word_count(text)
+        if words > 180:
+            parts = text.split()
+            text = " ".join(parts[:180])
+        return text
+
+    def build_log_notes_prompt(self, log: Dict[str, Any]) -> str:
+        return f"""
+You are a SOC analyst writing auto case notes for a single log record.
+
+STRICT RULES:
+- Use only the data provided.
+- Do not invent facts or outcomes.
+- Be defensive and blue-team only.
+- Treat allowlisted IOCs as benign.
+- Return ONLY valid JSON with the exact schema.
+- case_notes must be 80 to 180 words.
+
+Required JSON schema:
+{{
+  "case_notes": "string",
+  "risk_level": "low|medium|high|critical",
+  "confidence_score": 0,
+  "explainability": ["string"],
+  "recommended_actions": ["string"]
+}}
+
+Log Context:
+{json.dumps(log, indent=2)}
+"""
+
+    async def generate_log_notes(self, log: Dict[str, Any]) -> Dict[str, Any]:
+        signals = self._derive_log_signals(log or {})
+        derived_confidence = self._score_log_confidence(signals)
+        derived_risk = self._risk_level_from_score(derived_confidence, signals)
+        derived_explainability = self._build_explainability(log or {}, signals)
+        derived_actions = self._build_recommended_actions(log or {}, signals)
+
+        prompt = self.build_log_notes_prompt(log or {})
+        raw_output = ""
+        try:
+            raw_output = await self._ask_ollama(prompt)
+        except Exception:
+            fallback_notes = self._fallback_case_notes(log or {}, derived_explainability, derived_risk)
+            return {
+                "case_notes": fallback_notes,
+                "risk_level": derived_risk,
+                "confidence_score": derived_confidence,
+                "explainability": derived_explainability,
+                "recommended_actions": derived_actions,
+                "error": "LLM unavailable"
+            }
+
+        cleaned = self._clean_llm_output(raw_output)
+        extracted = self._extract_json_from_text(cleaned)
+        parsed: Dict[str, Any] = {}
+        try:
+            parsed = json.loads(extracted)
+        except Exception:
+            parsed = {}
+
+        case_notes = str(parsed.get("case_notes") or "").strip()
+        explainability = self._coerce_list(parsed.get("explainability"))
+        recommended_actions = self._coerce_list(parsed.get("recommended_actions"))
+
+        if not explainability:
+            explainability = derived_explainability
+        else:
+            combined = derived_explainability + explainability
+            explainability = []
+            seen = set()
+            for item in combined:
+                if item not in seen and item:
+                    seen.add(item)
+                    explainability.append(item)
+            explainability = explainability[:6]
+
+        if not recommended_actions:
+            recommended_actions = derived_actions
+        else:
+            combined = derived_actions + recommended_actions
+            recommended_actions = []
+            seen = set()
+            for item in combined:
+                if item not in seen and item:
+                    seen.add(item)
+                    recommended_actions.append(item)
+            if signals.get("allowlist_benign"):
+                recommended_actions = ["No action required (benign indicator confirmed)"]
+            else:
+                recommended_actions = recommended_actions[:6]
+
+        if self._word_count(case_notes) < 80 or self._word_count(case_notes) > 180:
+            case_notes = self._fallback_case_notes(log or {}, explainability, derived_risk)
+
+        return {
+            "case_notes": case_notes,
+            "risk_level": derived_risk,
+            "confidence_score": derived_confidence,
+            "explainability": explainability,
+            "recommended_actions": recommended_actions
+        }
+
     # =========================================================
     # Phase 3: Threat Intel Summary Helper (KEEP WORKING)
     # =========================================================
@@ -670,3 +1017,817 @@ Telemetry Context:
                     "Monitor endpoint for persistence"
                 ]
             }
+
+    def _extract_investigation_inputs(self, alert: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        alert = alert or {}
+        context = context or {}
+        extracted = {"ips": [], "domains": [], "sha256": [], "md5": [], "cves": []}
+        mapped_ioc_intel: List[Dict[str, Any]] = []
+        mitre_matches: List[Dict[str, Any]] = []
+
+        def _add_iocs(key: str, values: Any) -> None:
+            if not values:
+                return
+            if not isinstance(values, list):
+                values = [values]
+            for value in values:
+                value = str(value).strip()
+                if value and value not in extracted[key]:
+                    extracted[key].append(value)
+
+        processed_logs = context.get("processed_logs") or []
+        for log in processed_logs:
+            iocs = log.get("iocs") or {}
+            _add_iocs("ips", iocs.get("ips") or [])
+            _add_iocs("domains", iocs.get("domains") or [])
+            _add_iocs("sha256", iocs.get("sha256") or [])
+            _add_iocs("md5", iocs.get("md5") or [])
+            _add_iocs("cves", iocs.get("cves") or [])
+            fields = log.get("fields") or {}
+            ioc_intel = fields.get("ioc_intel") or {}
+            if ioc_intel:
+                mapped_ioc_intel.append(ioc_intel)
+            mitre = fields.get("mitre_matches") or []
+            if isinstance(mitre, list):
+                mitre_matches.extend([m for m in mitre if isinstance(m, dict)])
+
+        alert_ioc_matches = alert.get("ioc_matches") or alert.get("ioc_intel") or []
+        if isinstance(alert_ioc_matches, list):
+            mapped_ioc_intel.extend([m for m in alert_ioc_matches if isinstance(m, dict)])
+
+        alert_mitre = alert.get("mitre") or []
+        if isinstance(alert_mitre, list):
+            mitre_matches.extend([m for m in alert_mitre if isinstance(m, dict)])
+
+        dedup_mitre = []
+        seen = set()
+        for match in mitre_matches:
+            tid = str(match.get("technique_id") or match.get("id") or "").strip()
+            name = str(match.get("technique_name") or match.get("name") or "").strip()
+            key = f"{tid}|{name}"
+            if key not in seen and (tid or name):
+                seen.add(key)
+                dedup_mitre.append(match)
+
+        return {
+            "extracted_iocs": extracted,
+            "mapped_ioc_intel": mapped_ioc_intel,
+            "mitre_matches": dedup_mitre
+        }
+
+    def _build_investigation_exclusions(self, alert: Dict[str, Any], context: Dict[str, Any]) -> List[str]:
+        alert = alert or {}
+        context = context or {}
+        excluded = set()
+        if alert.get("id") is not None:
+            excluded.add(str(alert.get("id")))
+        evidence = alert.get("evidence") or {}
+        for key in ["alert_id", "event_id"]:
+            if evidence.get(key):
+                excluded.add(str(evidence.get(key)))
+        for key in ["processed_ids", "fingerprints"]:
+            for value in evidence.get(key) or []:
+                excluded.add(str(value))
+        processed_logs = context.get("processed_logs") or []
+        for log in processed_logs:
+            if log.get("id") is not None:
+                excluded.add(str(log.get("id")))
+            if log.get("event_id"):
+                excluded.add(str(log.get("event_id")))
+            if log.get("fingerprint"):
+                excluded.add(str(log.get("fingerprint")))
+        return list(excluded)
+
+    def _is_ipv4(self, value: str) -> bool:
+        return bool(re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", value or ""))
+
+    def _is_ipv6(self, value: str) -> bool:
+        return bool(re.fullmatch(r"[0-9a-fA-F:]{2,39}", value or "")) and ":" in (value or "")
+
+    def _is_domain(self, value: str) -> bool:
+        return bool(re.fullmatch(r"(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63}", value or ""))
+
+    def _is_sha256(self, value: str) -> bool:
+        return bool(re.fullmatch(r"[a-fA-F0-9]{64}", value or ""))
+
+    def _is_md5(self, value: str) -> bool:
+        return bool(re.fullmatch(r"[a-fA-F0-9]{32}", value or ""))
+
+    def _is_cve(self, value: str) -> bool:
+        return bool(re.fullmatch(r"CVE-\d{4}-\d{4,7}", value or "", re.IGNORECASE))
+
+    def _is_process_or_file(self, value: str) -> bool:
+        return str(value or "").lower().endswith((".exe", ".dll", ".sys", ".bat", ".ps1"))
+
+    def _infer_ioc_type(self, value: str) -> str:
+        if self._is_process_or_file(value):
+            return "process"
+        if self._is_ipv4(value) or self._is_ipv6(value):
+            return "ip"
+        if self._is_sha256(value):
+            return "sha256"
+        if self._is_md5(value):
+            return "md5"
+        if self._is_cve(value):
+            return "cve"
+        if self._is_domain(value):
+            return "domain"
+        return "unknown"
+
+    def _clean_ioc_verdicts(
+        self,
+        ioc_items: List[Dict[str, Any]],
+        extracted_iocs: Dict[str, List[str]],
+        excluded_values: List[str]
+    ) -> List[Dict[str, Any]]:
+        excluded = {str(v).strip() for v in excluded_values if str(v).strip()}
+        allowed = set()
+        for key in ["ips", "domains", "sha256", "md5", "cves"]:
+            for value in extracted_iocs.get(key) or []:
+                allowed.add(str(value).strip())
+        cleaned = []
+        for item in ioc_items:
+            ioc = str(item.get("ioc") or "").strip()
+            if not ioc:
+                continue
+            if ioc in excluded:
+                continue
+            if re.fullmatch(r"[0-9a-fA-F-]{36}", ioc):
+                continue
+            inferred = self._infer_ioc_type(ioc)
+            if inferred == "unknown" and ioc not in allowed and not self._is_process_or_file(ioc):
+                continue
+            ioc_type = str(item.get("type") or "").strip().lower()
+            if ioc_type in {"event_id", "alert_id", "processed_id", "fingerprint"}:
+                continue
+            if inferred in {"ip", "domain", "sha256", "md5", "cve", "process"}:
+                ioc_type = inferred
+            verdict = str(item.get("verdict") or "unknown").strip().lower()
+            if verdict not in {"malicious", "suspicious", "benign", "unknown"}:
+                verdict = "unknown"
+            confidence = item.get("confidence")
+            try:
+                confidence = int(confidence)
+            except Exception:
+                confidence = 0
+            confidence = int(max(0, min(100, confidence)))
+            evidence = str(item.get("evidence") or item.get("reason") or "").strip()
+            cleaned.append(
+                {
+                    "ioc": ioc,
+                    "type": ioc_type or "unknown",
+                    "verdict": verdict,
+                    "confidence": confidence,
+                    "evidence": evidence
+                }
+            )
+        return cleaned
+
+    def _build_investigation_explainability(
+        self,
+        alert: Dict[str, Any],
+        context: Dict[str, Any],
+        mitre_items: List[Dict[str, Any]],
+        ioc_items: List[Dict[str, Any]]
+    ) -> List[str]:
+        reasons: List[str] = []
+        alert = alert or {}
+        severity = str(alert.get("severity") or "").lower()
+        if severity:
+            reasons.append(f"Alert severity assessed as {severity}")
+        if mitre_items:
+            for item in mitre_items[:3]:
+                tid = str(item.get("technique_id") or "").strip()
+                name = str(item.get("name") or "").strip()
+                if tid and name:
+                    reasons.append(f"Matched MITRE technique {tid} {name}")
+                elif tid:
+                    reasons.append(f"Matched MITRE technique {tid}")
+        for item in ioc_items[:3]:
+            verdict = str(item.get("verdict") or "unknown")
+            ioc = str(item.get("ioc") or "")
+            reasons.append(f"IOC {ioc} classified as {verdict}")
+        correlation_findings = context.get("correlation_findings") or []
+        if correlation_findings:
+            reasons.append("Correlation findings present for related activity")
+        if not reasons:
+            reasons.append("Limited evidence available beyond alert metadata")
+        return reasons[:5]
+
+    def _build_confidence_breakdown(
+        self,
+        context: Dict[str, Any],
+        mitre_items: List[Dict[str, Any]],
+        ioc_items: List[Dict[str, Any]],
+        alert: Dict[str, Any]
+    ) -> Dict[str, int]:
+        correlation_findings = context.get("correlation_findings") or []
+        rule_weight = 20
+        severity = str((alert or {}).get("severity") or "").lower()
+        if severity in {"high", "critical"}:
+            rule_weight = 35
+        ioc_weight = 10
+        if any(i.get("verdict") in {"malicious", "suspicious"} for i in ioc_items):
+            ioc_weight = 30
+        mitre_weight = 10
+        if mitre_items:
+            mitre_weight = 25
+        correlation_weight = 5
+        if correlation_findings:
+            correlation_weight = 20
+        ai_weight = 10
+        return {
+            "mitre_weight": mitre_weight,
+            "ioc_weight": ioc_weight,
+            "rule_weight": rule_weight,
+            "correlation_weight": correlation_weight,
+            "ai_weight": ai_weight
+        }
+
+    def _build_case_notes(
+        self,
+        alert: Dict[str, Any],
+        context: Dict[str, Any],
+        explainability: List[str]
+    ) -> str:
+        alert = alert or {}
+        summary = str(alert.get("summary") or "").strip()
+        rule_name = str(alert.get("rule_name") or "").strip()
+        created_at = str(alert.get("created_at") or "").strip()
+        agent_id = str(alert.get("evidence", {}).get("agent_id") or "").strip()
+        hostname = str(alert.get("evidence", {}).get("hostname") or "").strip()
+        lines = []
+        if created_at:
+            lines.append(f"At {created_at}, an alert was generated for {rule_name or 'an observed activity'}.")
+        else:
+            lines.append(f"An alert was generated for {rule_name or 'an observed activity'}.")
+        if summary:
+            lines.append(f"Summary: {summary}")
+        if agent_id or hostname:
+            lines.append(f"Affected asset context: agent {agent_id or 'unknown'} on host {hostname or 'unknown'}.")
+        if explainability:
+            lines.append("Key observations:")
+            for item in explainability:
+                lines.append(f"- {item}")
+        processed_logs = context.get("processed_logs") or []
+        if processed_logs:
+            lines.append("Related processed logs were reviewed for context and supporting evidence.")
+        correlation_findings = context.get("correlation_findings") or []
+        if correlation_findings:
+            lines.append("Correlation signals were considered to determine potential multi-stage activity.")
+        return "\n".join(lines[:10])
+
+    def _ensure_min_lines(self, text: str, minimum: int, filler: List[str]) -> str:
+        text = str(text or "").strip()
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for item in filler:
+            if len(lines) >= minimum:
+                break
+            if item and item not in lines:
+                lines.append(item)
+        if not lines:
+            lines = filler[:minimum]
+        if len(lines) < minimum:
+            lines.extend([f"Additional context line {idx + 1}." for idx in range(minimum - len(lines))])
+        return "\n".join(lines[: max(minimum, len(lines))])
+
+    def _ensure_min_items(self, items: List[str], minimum: int, filler: List[str]) -> List[str]:
+        items = [str(x).strip() for x in items if str(x).strip()]
+        for item in filler:
+            if len(items) >= minimum:
+                break
+            if item and item not in items:
+                items.append(item)
+        if len(items) < minimum:
+            items.extend([f"Additional item {idx + 1}" for idx in range(minimum - len(items))])
+        return items[: max(minimum, len(items))]
+
+    def _normalize_investigation(
+        self,
+        parsed: Dict[str, Any],
+        alert: Optional[Dict[str, Any]] = None,
+        context: Optional[Dict[str, Any]] = None,
+        error_message: Optional[str] = None
+    ) -> Dict[str, Any]:
+        parsed = parsed or {}
+        alert = alert or {}
+        context = context or {}
+
+        summary = str(parsed.get("summary") or "").strip()
+        if not summary:
+            summary = "Insufficient evidence to confirm a definitive incident outcome."
+
+        mitre_mapping = parsed.get("mitre_mapping") or parsed.get("mitre") or []
+        if not isinstance(mitre_mapping, list):
+            mitre_mapping = [mitre_mapping]
+        mitre_items: List[Dict[str, Any]] = []
+        for item in mitre_mapping:
+            if isinstance(item, dict):
+                technique_id = str(item.get("technique_id") or item.get("id") or "").strip()
+                name = str(item.get("name") or item.get("technique_name") or "").strip()
+                tactics = item.get("tactics") or []
+                if not isinstance(tactics, list):
+                    tactics = [tactics]
+                tactics = [str(t).strip() for t in tactics if str(t).strip()]
+                if not technique_id and name:
+                    technique_id = name
+                if technique_id or name or tactics:
+                    mitre_items.append(
+                        {
+                            "technique_id": technique_id,
+                            "name": name,
+                            "tactics": tactics
+                        }
+                    )
+            else:
+                value = str(item).strip()
+                if value:
+                    mitre_items.append(
+                        {
+                            "technique_id": value,
+                            "name": value,
+                            "tactics": []
+                        }
+                    )
+
+        ioc_verdicts = parsed.get("ioc_verdicts") or parsed.get("ioc_matches") or []
+        if not isinstance(ioc_verdicts, list):
+            ioc_verdicts = [ioc_verdicts]
+        ioc_items: List[Dict[str, Any]] = []
+        for item in ioc_verdicts:
+            if not isinstance(item, dict):
+                value = str(item).strip()
+                if value:
+                    ioc_items.append(
+                        {
+                            "ioc": value,
+                            "type": "unknown",
+                            "verdict": "unknown",
+                            "confidence": 0,
+                            "evidence": ""
+                        }
+                    )
+                continue
+            ioc = str(item.get("ioc") or item.get("indicator") or "").strip()
+            ioc_type = str(item.get("type") or item.get("ioc_type") or "unknown").strip()
+            verdict = str(item.get("verdict") or "unknown").strip().lower()
+            if verdict not in {"malicious", "suspicious", "benign", "unknown"}:
+                verdict = "unknown"
+            confidence = item.get("confidence")
+            try:
+                confidence = int(confidence)
+            except Exception:
+                confidence = 0
+            confidence = int(max(0, min(100, confidence)))
+            evidence = str(item.get("evidence") or item.get("reason") or "").strip()
+            if ioc:
+                ioc_items.append(
+                    {
+                        "ioc": ioc,
+                        "type": ioc_type or "unknown",
+                        "verdict": verdict,
+                        "confidence": confidence,
+                        "evidence": evidence
+                    }
+                )
+
+        extracted_inputs = self._extract_investigation_inputs(alert, context)
+        excluded_values = self._build_investigation_exclusions(alert, context)
+        ioc_items = self._clean_ioc_verdicts(
+            ioc_items,
+            extracted_inputs.get("extracted_iocs") or {},
+            excluded_values
+        )
+
+        assessment = parsed.get("assessment") or {}
+        if not isinstance(assessment, dict):
+            assessment = {}
+        assessment_is_incident = self._normalize_bool(assessment.get("is_incident"))
+        assessment_severity = str(assessment.get("incident_severity") or "").strip().lower()
+        assessment_confidence = assessment.get("confidence_score")
+        assessment_reasoning = str(assessment.get("reasoning") or "").strip()
+
+        try:
+            confidence_score = int(assessment_confidence or parsed.get("confidence_score") or 0)
+        except Exception:
+            confidence_score = 0
+        confidence_score = int(max(0, min(100, confidence_score)))
+
+        is_incident = assessment_is_incident if assessment.get("is_incident") is not None else self._normalize_bool(parsed.get("is_incident"))
+        incident_severity = assessment_severity or str(parsed.get("incident_severity") or "").strip().lower()
+        if is_incident:
+            if incident_severity not in {"low", "medium", "high", "critical"}:
+                incident_severity = "medium"
+        else:
+            incident_severity = "none"
+        if not assessment_reasoning:
+            assessment_reasoning = "Insufficient evidence to confirm an incident; validate additional telemetry."
+
+        recommended_actions = parsed.get("recommended_actions") or []
+        if not isinstance(recommended_actions, list):
+            recommended_actions = [recommended_actions]
+        recommended_actions = [str(x).strip() for x in recommended_actions if str(x).strip()]
+        alert_actions = alert.get("recommended_actions") or []
+        if isinstance(alert_actions, list):
+            recommended_actions.extend([str(x).strip() for x in alert_actions if str(x).strip()])
+
+        explainability = parsed.get("explainability") or []
+        if not isinstance(explainability, list):
+            explainability = [explainability]
+        explainability = [str(x).strip() for x in explainability if str(x).strip()]
+        if not explainability:
+            explainability = self._build_investigation_explainability(alert, context, mitre_items, ioc_items)
+
+        case_notes = str(parsed.get("case_notes") or "").strip()
+        if not case_notes:
+            case_notes = self._build_case_notes(alert, context, explainability)
+
+        confidence_breakdown = parsed.get("confidence_breakdown") or {}
+        if not isinstance(confidence_breakdown, dict):
+            confidence_breakdown = {}
+        if not confidence_breakdown:
+            confidence_breakdown = self._build_confidence_breakdown(context, mitre_items, ioc_items, alert)
+
+        summary = self._ensure_min_lines(
+            summary,
+            3,
+            [
+                "Alert context reviewed with available evidence and alert metadata.",
+                "No external intelligence was used beyond provided context.",
+                "Insufficient evidence noted; follow-up validation recommended."
+            ]
+        )
+
+        case_notes = self._ensure_min_lines(
+            case_notes,
+            8,
+            [
+                "Alert evidence was reviewed across available logs and alert metadata.",
+                "Suspiciousness is based on rule context and indicator matches provided.",
+                "Observed evidence is limited to the supplied alert data.",
+                "No corroborating telemetry was provided beyond the evidence bundle.",
+                "Missing context includes host activity baselines and authentication history.",
+                "Validate process ancestry and user context before escalation.",
+                "Confirm network destinations and any matching IOC telemetry.",
+                "Continue monitoring for related alerts or correlation findings."
+            ]
+        )
+
+        explainability = self._ensure_min_items(
+            explainability,
+            4,
+            [
+                "Alert classification is based on rule logic and severity context.",
+                "IOC or MITRE indicators were evaluated using provided inputs.",
+                "Correlation findings were reviewed for related activity.",
+                "Evidence gaps were identified; additional validation is required."
+            ]
+        )
+
+        recommended_actions = self._ensure_min_items(
+            recommended_actions,
+            3,
+            [
+                "Collect additional telemetry for the affected host and user.",
+                "Validate IOC activity across network and endpoint logs.",
+                "Monitor for repeat or correlated activity tied to this alert."
+            ]
+        )
+
+        timeline = parsed.get("timeline") or []
+        timeline_items: List[str] = []
+        if isinstance(timeline, list):
+            for item in timeline:
+                if isinstance(item, str):
+                    value = item.strip()
+                    if value:
+                        timeline_items.append(value)
+                    continue
+                if isinstance(item, dict):
+                    timestamp = str(item.get("timestamp") or item.get("time") or "").strip()
+                    event = str(item.get("event") or item.get("activity") or "").strip()
+                    source = str(item.get("source") or item.get("log_source") or "").strip()
+                    parts = [part for part in [timestamp, event, source] if part]
+                    if parts:
+                        timeline_items.append(" — ".join(parts))
+        timeline_items = self._ensure_min_items(
+            timeline_items,
+            3,
+            [
+                "Step 1: Alert triggered and initial evidence collected.",
+                "Step 2: Evidence reviewed for IOC and MITRE alignment.",
+                "Step 3: Additional validation steps identified."
+            ]
+        )
+
+        ioc_analysis = parsed.get("ioc_analysis") or {}
+        if not isinstance(ioc_analysis, dict):
+            ioc_analysis = {}
+        observed_iocs = ioc_analysis.get("observed_iocs")
+        if not isinstance(observed_iocs, list):
+            observed_iocs = [item.get("ioc") for item in ioc_items if item.get("ioc")]
+        observed_iocs = [str(x).strip() for x in observed_iocs if str(x).strip()]
+        ioc_verdict = str(ioc_analysis.get("ioc_verdict") or "unknown").strip().lower()
+        if ioc_verdict not in {"malicious", "suspicious", "unknown", "benign"}:
+            ioc_verdict = "unknown"
+        ioc_notes = str(ioc_analysis.get("ioc_notes") or "").strip()
+        if not ioc_notes:
+            ioc_notes = "IOC verdict is based only on provided evidence; validate via additional telemetry."
+
+        mitre_analysis = parsed.get("mitre_analysis") or {}
+        if not isinstance(mitre_analysis, dict):
+            mitre_analysis = {}
+        techniques = mitre_analysis.get("techniques")
+        if not isinstance(techniques, list):
+            techniques = []
+        techniques = [str(x).strip() for x in techniques if str(x).strip()]
+        if not techniques:
+            techniques = [f"{m.get('technique_id') or m.get('name')}".strip() for m in mitre_items if m.get("technique_id") or m.get("name")]
+        tactics = mitre_analysis.get("tactics")
+        if not isinstance(tactics, list):
+            tactics = []
+        tactics = [str(x).strip() for x in tactics if str(x).strip()]
+        mitre_notes = str(mitre_analysis.get("mitre_notes") or "").strip()
+        if not mitre_notes:
+            mitre_notes = "MITRE mapping reflects provided alert context and may require analyst validation."
+
+        assessment = {
+            "is_incident": bool(is_incident),
+            "incident_severity": incident_severity,
+            "confidence_score": confidence_score,
+            "reasoning": assessment_reasoning
+        }
+
+        return {
+            "summary": summary,
+            "timeline": timeline_items,
+            "mitre_mapping": mitre_items,
+            "ioc_verdicts": ioc_items,
+            "confidence_score": confidence_score,
+            "is_incident": is_incident,
+            "incident_severity": incident_severity,
+            "recommended_actions": recommended_actions,
+            "case_notes": case_notes,
+            "explainability": explainability,
+            "confidence_breakdown": confidence_breakdown,
+            "assessment": assessment,
+            "ioc_analysis": {
+                "observed_iocs": observed_iocs,
+                "ioc_verdict": ioc_verdict,
+                "ioc_notes": ioc_notes
+            },
+            "mitre_analysis": {
+                "techniques": techniques,
+                "tactics": tactics,
+                "mitre_notes": mitre_notes
+            },
+            "status": "failed" if error_message else "completed",
+            "error_message": error_message
+        }
+
+    def build_investigation_prompt(self, alert: Dict[str, Any], context: Dict[str, Any]) -> str:
+        alert = alert or {}
+        context = context or {}
+        extracted = self._extract_investigation_inputs(alert, context)
+        evidence = alert.get("evidence") or {}
+        mitre_list = alert.get("mitre") or []
+        mitre_techniques = []
+        if isinstance(mitre_list, list):
+            for item in mitre_list:
+                if isinstance(item, dict):
+                    tid = str(item.get("technique_id") or item.get("id") or "").strip()
+                    name = str(item.get("name") or item.get("technique_name") or "").strip()
+                    label = f"{tid} {name}".strip()
+                    if label:
+                        mitre_techniques.append(label)
+                else:
+                    value = str(item).strip()
+                    if value:
+                        mitre_techniques.append(value)
+        ioc_matches = alert.get("ioc_matches") or []
+        if not isinstance(ioc_matches, list):
+            ioc_matches = [ioc_matches]
+        processed_logs = context.get("processed_logs") or []
+        raw_snippets = []
+        if isinstance(processed_logs, list):
+            for log in processed_logs[:5]:
+                if not isinstance(log, dict):
+                    continue
+                raw_snippets.append(
+                    {
+                        "timestamp": log.get("timestamp"),
+                        "event_type": log.get("event_type"),
+                        "message": log.get("message"),
+                        "raw": log.get("raw")
+                    }
+                )
+        correlation_findings = context.get("correlation_findings") or []
+        if not isinstance(correlation_findings, list):
+            correlation_findings = [correlation_findings]
+        input_fields = {
+            "alert_id": alert.get("id") or alert.get("alert_id"),
+            "rule_name": alert.get("rule_name"),
+            "rule_id": alert.get("rule_id"),
+            "severity": alert.get("severity"),
+            "confidence": alert.get("confidence_score"),
+            "summary": alert.get("summary"),
+            "mitre_techniques": mitre_techniques,
+            "ioc_matches": ioc_matches,
+            "processed_log_ids": evidence.get("processed_ids") or [],
+            "evidence_fingerprints": evidence.get("fingerprints") or [],
+            "raw_event_snippets": raw_snippets,
+            "correlation_findings": correlation_findings
+        }
+        return f"""
+You are a SOC incident investigator.
+
+STRICT RULES:
+- Use only the data provided.
+- Do not invent facts.
+- Keep response safe and professional.
+- Do not include offensive or explicit content.
+- Return ONLY valid JSON.
+- Do NOT invent new IOCs not present in extracted_iocs.
+- Domains must be valid DNS names with a dot and TLD-like suffix.
+- IPs must be valid IPv4 or IPv6.
+- SHA256 must be 64 hex, MD5 must be 32 hex.
+- Filenames ending with .exe/.dll/.sys/.bat/.ps1 are process/file, not domain.
+- Never treat fingerprints, event_ids, processed_ids, or alert_id as IOCs.
+- If is_incident=false then incident_severity="none".
+- If is_incident=true then incident_severity must be low|medium|high|critical.
+- Keep tone stable and consistent as SOC analyst case notes.
+- Summary must be at least 3 lines.
+- Case notes must be at least 8 lines.
+- Explainability must have at least 4 bullet items.
+- Recommended actions must have at least 3 items.
+- Timeline must have at least 3 steps.
+- If evidence is missing, state "insufficient evidence" and propose validation steps.
+
+Required JSON schema:
+{{
+  "summary": "3-6 lines SOC analyst summary with context and impact",
+  "case_notes": "Detailed paragraph style case notes (8-15 lines). Must include: what happened, why suspicious, what evidence supports it, what is missing, what to verify next.",
+  "explainability": ["Bullet 1 explaining key trigger with evidence", "Bullet 2 explaining mapping or IOC", "Bullet 3 explaining correlation/timeline", "Bullet 4 explaining uncertainty or missing context"],
+  "assessment": {
+    "is_incident": false,
+    "incident_severity": "low|medium|high|critical",
+    "confidence_score": 0,
+    "reasoning": "Short but clear reasoning why it is/is not an incident"
+  },
+  "recommended_actions": ["Action 1 (specific)", "Action 2 (specific)", "Action 3 (specific)"],
+  "ioc_analysis": {
+    "observed_iocs": ["..."],
+    "ioc_verdict": "malicious|suspicious|unknown|benign",
+    "ioc_notes": "Explain IOC meaning and what to do next"
+  },
+  "mitre_analysis": {
+    "techniques": ["Txxxx.xxx ..."],
+    "tactics": ["..."],
+    "mitre_notes": "Explain what this technique means in plain SOC language"
+  },
+  "timeline": ["Step 1: ...", "Step 2: ...", "Step 3: ..."]
+}}
+
+Input Fields:
+{json.dumps(input_fields, indent=2)}
+
+Alert:
+{json.dumps(alert, indent=2)}
+
+Extracted Inputs:
+{json.dumps(extracted, indent=2)}
+
+Context:
+{json.dumps(context, indent=2)}
+"""
+
+    async def investigate_alert(self, alert: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = self.build_investigation_prompt(alert, context)
+        raw_output = await self._ask_ollama(prompt)
+        cleaned = self._clean_llm_output(raw_output)
+        extracted = self._extract_json_from_text(cleaned)
+        try:
+            parsed = json.loads(extracted)
+            normalized = self._normalize_investigation(parsed, alert, context)
+        except Exception:
+            repair_prompt = f"""
+You are a SOC analyst. Fix the JSON to match the exact schema below and return ONLY valid JSON.
+
+Schema:
+{{
+  "summary": "3-6 lines SOC analyst summary with context and impact",
+  "case_notes": "Detailed paragraph style case notes (8-15 lines). Must include: what happened, why suspicious, what evidence supports it, what is missing, what to verify next.",
+  "explainability": ["Bullet 1 explaining key trigger with evidence", "Bullet 2 explaining mapping or IOC", "Bullet 3 explaining correlation/timeline", "Bullet 4 explaining uncertainty or missing context"],
+  "assessment": {{
+    "is_incident": false,
+    "incident_severity": "low|medium|high|critical",
+    "confidence_score": 0,
+    "reasoning": "Short but clear reasoning why it is/is not an incident"
+  }},
+  "recommended_actions": ["Action 1 (specific)", "Action 2 (specific)", "Action 3 (specific)"],
+  "ioc_analysis": {{
+    "observed_iocs": ["..."],
+    "ioc_verdict": "malicious|suspicious|unknown|benign",
+    "ioc_notes": "Explain IOC meaning and what to do next"
+  }},
+  "mitre_analysis": {{
+    "techniques": ["Txxxx.xxx ..."],
+    "tactics": ["..."],
+    "mitre_notes": "Explain what this technique means in plain SOC language"
+  }},
+  "timeline": ["Step 1: ...", "Step 2: ...", "Step 3: ..."]
+}}
+
+Broken Output:
+{cleaned}
+"""
+            try:
+                repaired_raw = await self._ask_ollama(repair_prompt)
+                repaired_clean = self._clean_llm_output(repaired_raw)
+                repaired_extracted = self._extract_json_from_text(repaired_clean)
+                parsed = json.loads(repaired_extracted)
+                normalized = self._normalize_investigation(parsed, alert, context)
+                cleaned = repaired_clean
+            except Exception:
+                error_message = "Invalid JSON output from LLM"
+                normalized = self._normalize_investigation({}, alert, context, error_message=error_message)
+                if cleaned:
+                    normalized["summary"] = cleaned[:400]
+        return {
+            "result": normalized,
+            "raw_output": cleaned,
+            "prompt": prompt,
+            "model": self.model
+        }
+
+    async def investigation_smoke_test(self) -> List[Dict[str, Any]]:
+        samples = [
+            {
+                "alert": {
+                    "id": 101,
+                    "rule_id": "RULE-IOC-001",
+                    "rule_name": "Suspicious IOC Match",
+                    "severity": "high",
+                    "confidence_score": 85,
+                    "summary": "Known malicious hash detected in endpoint telemetry.",
+                    "evidence": {"processed_ids": [1, 2], "fingerprints": ["fp-001"]},
+                    "mitre": [],
+                    "ioc_matches": [{"ioc": "8.8.8.8", "verdict": "benign"}],
+                    "recommended_actions": ["Block malicious indicators at perimeter"]
+                },
+                "context": {
+                    "processed_logs": [
+                        {
+                            "id": 1,
+                            "timestamp": "2026-01-26T01:00:00Z",
+                            "event_type": "dns_query",
+                            "message": "Suspicious DNS query observed",
+                            "raw": "dns query for example.com",
+                            "iocs": {"domains": ["example.com"]},
+                            "fields": {}
+                        }
+                    ],
+                    "correlation_findings": []
+                }
+            },
+            {
+                "alert": {
+                    "id": 102,
+                    "rule_id": "RULE-MITRE-002",
+                    "rule_name": "MITRE Technique Match",
+                    "severity": "medium",
+                    "confidence_score": 60,
+                    "summary": "Technique match observed in behavior analytics.",
+                    "evidence": {"processed_ids": [], "fingerprints": []},
+                    "mitre": [{"technique_id": "T1055", "name": "Process Injection"}],
+                    "ioc_matches": [],
+                    "recommended_actions": []
+                },
+                "context": {
+                    "processed_logs": [],
+                    "correlation_findings": [{"title": "Process injection correlation", "severity": "medium"}]
+                }
+            },
+            {
+                "alert": {
+                    "id": 103,
+                    "rule_id": "RULE-MIN-003",
+                    "rule_name": "Minimal Evidence Alert",
+                    "severity": "low",
+                    "confidence_score": 30,
+                    "summary": "Minimal evidence alert triggered.",
+                    "evidence": {},
+                    "mitre": [],
+                    "ioc_matches": [],
+                    "recommended_actions": []
+                },
+                "context": {"processed_logs": [], "correlation_findings": []}
+            }
+        ]
+        results = []
+        for sample in samples:
+            response = await self.investigate_alert(sample["alert"], sample["context"])
+            result = response.get("result") or {}
+            results.append(result)
+            print(json.dumps(result, indent=2))
+        return results

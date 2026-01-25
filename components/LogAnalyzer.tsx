@@ -1,166 +1,248 @@
 
-import React, { useState, useEffect } from 'react';
-import { offlineAnalyzeLog } from "../services/offlineAnalyzer";
-import { analyzeLog } from "../services/gemini";
-import { AnalysisResult } from '../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { api } from '../services/api';
+import { ProcessedLog } from '../types';
 
 const LogAnalyzer: React.FC = () => {
-  const [logs, setLogs] = useState('');
+  const [logs, setLogs] = useState<ProcessedLog[]>([]);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [completedTasks, setCompletedTasks] = useState<number[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('all');
+  const [severityFilter, setSeverityFilter] = useState('all');
+  const [agentFilter, setAgentFilter] = useState('all');
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const navigate = useNavigate();
 
-  const handleAnalyze = async () => {
-  if (!logs.trim()) return;
-
-  setLoading(true);
-  setCompletedTasks([]);
-
-  try {
-    // 1) Try AI (Gemini) first
-    const aiResult = await analyzeLog(logs);
-    setResult(aiResult);
-  } catch (error) {
-    console.warn("Gemini failed, switching to Offline Analyzer...", error);
-
-    // 2) If AI fails, fallback to Offline rules
-    const offlineResult = offlineAnalyzeLog(logs);
-    setResult(offlineResult);
-  } finally {
-    setLoading(false);
-  }
-};
-
-  const toggleTask = (index: number) => {
-    setCompletedTasks(prev => 
-      prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]
-    );
+  const severityLabel = (score: number) => {
+    if (score >= 90) return 'critical';
+    if (score >= 80) return 'high';
+    if (score >= 50) return 'medium';
+    if (score >= 20) return 'low';
+    return 'info';
   };
 
-  const getRiskColor = (score: number) => {
-    if (score > 75) return 'text-rose-500';
-    if (score > 40) return 'text-amber-500';
-    return 'text-emerald-500';
+  const severityStyles: Record<string, string> = {
+    critical: 'bg-rose-500/15 text-rose-400 border-rose-500/30',
+    high: 'bg-orange-500/15 text-orange-400 border-orange-500/30',
+    medium: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+    low: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+    info: 'bg-slate-500/10 text-slate-400 border-slate-500/20'
   };
 
-  const completionRate = result ? Math.round((completedTasks.length / result.recommendations.length) * 100) : 0;
+  const fetchLogs = async (showLoading = false) => {
+    if (showLoading) setLoading(true);
+    setError(null);
+    try {
+      const data = await api.getProcessedLogs(100);
+      setLogs(data);
+      setLastUpdated(new Date());
+    } catch (err: any) {
+      setError(err?.message || 'Failed to load processed logs.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchLogs(true);
+    const interval = setInterval(() => fetchLogs(), 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const categories = useMemo(() => {
+    return Array.from(new Set(logs.map((log) => log.category).filter(Boolean))).sort();
+  }, [logs]);
+
+  const agents = useMemo(() => {
+    return Array.from(new Set(logs.map((log) => log.agent_id).filter(Boolean))).sort();
+  }, [logs]);
+
+  const filteredLogs = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return logs.filter((log) => {
+      const severity = severityLabel(log.severity_score);
+      if (categoryFilter !== 'all' && log.category !== categoryFilter) return false;
+      if (severityFilter !== 'all' && severity !== severityFilter) return false;
+      if (agentFilter !== 'all' && log.agent_id !== agentFilter) return false;
+      if (!q) return true;
+      const iocs = log.iocs_json || {};
+      const iocText = [
+        ...(iocs.ips || []),
+        ...(iocs.domains || []),
+        ...(iocs.sha256 || []),
+        ...(iocs.md5 || []),
+        ...(iocs.cves || [])
+      ].join(' ');
+      const tags = (log.tags_json || []).join(' ');
+      const haystack = [
+        log.message,
+        log.hostname,
+        log.agent_id,
+        log.category,
+        log.event_type,
+        iocText,
+        tags
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [logs, search, categoryFilter, severityFilter, agentFilter]);
+
+  const formatTime = (value: string | null | undefined) => {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString();
+  };
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto">
-      <header>
-        <h1 className="text-3xl font-bold text-slate-50">AI Forensic Log Analyzer</h1>
-        <p className="text-slate-400">Deep inspection of raw system, network, or application logs using Gemini 3.</p>
+    <div className="space-y-6">
+      <header className="flex flex-col gap-2">
+        <h1 className="text-3xl font-bold text-slate-50">Log Analysis</h1>
+        <div className="flex items-center gap-3 text-slate-500 text-sm">
+          <span>Unified processing view across endpoint, DNS, network, auth, system, and application logs</span>
+          <span className="text-[10px] font-mono text-slate-600 border-l border-slate-800 pl-3">
+            AUTO-REFRESH: 10S {lastUpdated ? `(${lastUpdated.toLocaleTimeString()})` : ''}
+          </span>
+        </div>
       </header>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <div className="space-y-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-            <label className="block text-sm font-medium text-slate-400 mb-2 uppercase tracking-widest font-bold text-[10px]">Log Evidence Input</label>
-            <textarea
-              className="w-full h-96 bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-sm text-slate-300 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all resize-none"
-              placeholder="Example: 2023-10-27 10:14:52 Failed login for root from 192.168.1.15..."
-              value={logs}
-              onChange={(e) => setLogs(e.target.value)}
-            />
-            <button
-              onClick={handleAnalyze}
-              disabled={loading || !logs.trim()}
-              className={`mt-4 w-full py-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all shadow-lg ${
-                loading ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-500 text-white'
-              }`}
-            >
-              {loading ? (
-                <><i className="fa-solid fa-circle-notch fa-spin"></i> Analyzing Evidence...</>
-              ) : (
-                <><i className="fa-solid fa-magnifying-glass-chart"></i> Run Security Analysis</>
-              )}
-            </button>
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+        <div className="flex flex-col lg:flex-row lg:items-center gap-3">
+          <div className="flex-1">
+            <div className="relative">
+              <i className="fa-solid fa-magnifying-glass absolute left-3 top-3 text-slate-500 text-sm"></i>
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search message, hostname, IP, domain"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2.5 pl-9 pr-3 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+              />
+            </div>
           </div>
+          <select
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+            className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-slate-200"
+          >
+            <option value="all">All Categories</option>
+            {categories.map((cat) => (
+              <option key={cat} value={cat}>{cat}</option>
+            ))}
+          </select>
+          <select
+            value={severityFilter}
+            onChange={(e) => setSeverityFilter(e.target.value)}
+            className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-slate-200"
+          >
+            <option value="all">All Severities</option>
+            {['critical', 'high', 'medium', 'low', 'info'].map((sev) => (
+              <option key={sev} value={sev}>{sev.toUpperCase()}</option>
+            ))}
+          </select>
+          <select
+            value={agentFilter}
+            onChange={(e) => setAgentFilter(e.target.value)}
+            className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm text-slate-200"
+          >
+            <option value="all">All Agents</option>
+            {agents.map((agent) => (
+              <option key={agent} value={agent}>{agent}</option>
+            ))}
+          </select>
+          <button
+            onClick={() => fetchLogs(true)}
+            disabled={loading}
+            className="bg-slate-950 border border-slate-800 hover:border-slate-700 text-slate-300 px-4 py-2 rounded-xl text-sm flex items-center gap-2 transition-all"
+          >
+            <i className={`fa-solid fa-rotate ${loading ? 'fa-spin' : ''}`}></i>
+            Refresh
+          </button>
         </div>
+      </div>
 
-        <div className="space-y-4">
-          {!result && !loading ? (
-            <div className="h-full flex flex-col items-center justify-center bg-slate-900/50 border-2 border-dashed border-slate-800 rounded-2xl p-12 text-center text-slate-500">
-              <i className="fa-solid fa-microchip text-4xl mb-4 opacity-20"></i>
-              <p>Analysis report will appear here once logs are submitted</p>
-            </div>
-          ) : loading ? (
-            <div className="h-full flex flex-col items-center justify-center bg-slate-900 border border-slate-800 rounded-2xl p-12 text-center">
-              <div className="animate-pulse flex flex-col items-center">
-                <div className="w-16 h-16 bg-emerald-500/20 rounded-full flex items-center justify-center mb-6">
-                  <i className="fa-solid fa-shield-halved text-2xl text-emerald-500"></i>
-                </div>
-                <h4 className="text-xl font-semibold text-slate-200 mb-2 uppercase tracking-tighter">Sentinel AI is Thinking</h4>
-                <p className="text-slate-400 text-sm">Scanning for SQL injection, lateral movement, and credential theft...</p>
-              </div>
-            </div>
-          ) : (
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-500 shadow-2xl">
-              <div className="p-6 border-b border-slate-800 bg-slate-900/50 flex justify-between items-center">
-                <h3 className="font-semibold text-lg">Forensic Report</h3>
-                <div className="flex items-center gap-2 px-3 py-1 bg-slate-800 rounded-full border border-slate-700">
-                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-bold">Risk Level</span>
-                  <span className={`font-mono font-bold ${getRiskColor(result.riskScore)}`}>{result.riskScore}/100</span>
-                </div>
-              </div>
-              
-              <div className="p-6 space-y-6">
-                <div>
-                  <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Threat Assessment</h4>
-                  <div className={`flex items-center gap-2 font-bold uppercase text-xs p-3 rounded-lg border ${result.threatDetected ? 'text-rose-400 bg-rose-400/5 border-rose-400/20' : 'text-emerald-400 bg-emerald-400/5 border-emerald-400/20'}`}>
-                    <i className={`fa-solid ${result.threatDetected ? 'fa-triangle-exclamation' : 'fa-circle-check'}`}></i>
-                    {result.threatDetected ? 'Critical Vulnerability Confirmed' : 'No Critical Threats Detected'}
-                  </div>
-                </div>
-
-                <div>
-                  <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Findings Details</h4>
-                  <p className="text-slate-300 leading-relaxed bg-slate-950 p-4 rounded-xl border border-slate-800 text-sm font-medium italic">"{result.explanation}"</p>
-                </div>
-
-                <div className="pt-4 border-t border-slate-800/50">
-                  <div className="flex justify-between items-end mb-4">
-                    <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Remediation Roadmap</h4>
-                    <span className="text-[10px] font-mono text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-500/20">{completionRate}% COMPLETE</span>
-                  </div>
-                  
-                  {/* Progress Bar */}
-                  <div className="w-full bg-slate-950 h-2 rounded-full mb-6 border border-slate-800 overflow-hidden">
-                    <div 
-                      className="h-full bg-emerald-500 transition-all duration-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]" 
-                      style={{ width: `${completionRate}%` }}
-                    ></div>
-                  </div>
-
-                  <div className="space-y-3">
-                    {result.recommendations.map((rec, i) => (
-                      <button 
-                        key={i} 
-                        onClick={() => toggleTask(i)}
-                        className={`w-full flex gap-3 p-3 rounded-xl border transition-all text-left group ${
-                          completedTasks.includes(i) 
-                            ? 'bg-emerald-500/5 border-emerald-500/20 text-slate-400' 
-                            : 'bg-slate-950 border-slate-800 hover:border-slate-700 text-slate-200'
-                        }`}
-                      >
-                        <div className={`flex-shrink-0 w-6 h-6 rounded-lg flex items-center justify-center border transition-all ${
-                          completedTasks.includes(i)
-                            ? 'bg-emerald-500 border-emerald-400 text-white'
-                            : 'bg-slate-900 border-slate-700 group-hover:border-slate-500 text-transparent'
-                        }`}>
-                          <i className="fa-solid fa-check text-[10px]"></i>
-                        </div>
-                        <span className={`text-xs font-medium leading-relaxed ${completedTasks.includes(i) ? 'line-through opacity-50' : ''}`}>
-                          {rec}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
+      {error && (
+        <div className="bg-rose-500/10 border border-rose-500/30 rounded-2xl px-4 py-3 text-rose-300 text-sm">
+          {error}
         </div>
+      )}
+
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+        <table className="w-full text-left border-collapse text-sm">
+          <thead className="bg-slate-900/50 border-b border-slate-800">
+            <tr className="text-[10px] uppercase tracking-widest text-slate-500">
+              <th className="px-4 py-3">Time</th>
+              <th className="px-4 py-3">Hostname</th>
+              <th className="px-4 py-3">Agent</th>
+              <th className="px-4 py-3">Category</th>
+              <th className="px-4 py-3">Event Type</th>
+              <th className="px-4 py-3">Severity</th>
+              <th className="px-4 py-3">Message</th>
+              <th className="px-4 py-3">Tags</th>
+              <th className="px-4 py-3">IOC Risk</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && logs.length === 0 ? (
+              <tr>
+                <td colSpan={9} className="px-6 py-12 text-center text-slate-500">
+                  <i className="fa-solid fa-spinner fa-spin text-2xl mb-3"></i>
+                  <div className="text-xs uppercase tracking-widest">Loading processed logs</div>
+                </td>
+              </tr>
+            ) : filteredLogs.length === 0 ? (
+              <tr>
+                <td colSpan={9} className="px-6 py-12 text-center text-slate-500">
+                  No logs match the current filters.
+                </td>
+              </tr>
+            ) : (
+              filteredLogs.map((log) => {
+                const sev = severityLabel(log.severity_score);
+                const rowHighlight = log.severity_score >= 80 ? 'bg-rose-500/5' : '';
+                const iocSummary = (log.ioc_intel as any)?.ioc_summary || {};
+                const iocRisk = iocSummary?.risk || 'unknown';
+                const iocConfidence = typeof iocSummary?.confidence === 'number' ? `${iocSummary.confidence}%` : '—';
+                return (
+                  <tr
+                    key={log.id}
+                    onClick={() => navigate(`/log-analysis/${log.id}`)}
+                    className={`border-b border-slate-800 hover:bg-slate-800/40 cursor-pointer ${rowHighlight}`}
+                  >
+                    <td className="px-4 py-3 text-xs text-slate-400">{formatTime(log.timestamp)}</td>
+                    <td className="px-4 py-3 text-slate-200">{log.hostname || '—'}</td>
+                    <td className="px-4 py-3 text-slate-300">{log.agent_id || '—'}</td>
+                    <td className="px-4 py-3 text-slate-300">{log.category}</td>
+                    <td className="px-4 py-3 text-slate-400">{log.event_type}</td>
+                    <td className="px-4 py-3">
+                      <span className={`text-[10px] uppercase tracking-widest border px-2 py-1 rounded-full ${severityStyles[sev]}`}>
+                        {sev} {log.severity_score}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-slate-200 truncate max-w-[240px]">{log.message}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-1">
+                        {(log.tags_json || []).slice(0, 3).map((tag, idx) => (
+                          <span key={`${log.id}-tag-${idx}`} className="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-300">
+                      <div className="uppercase">{iocRisk}</div>
+                      <div className="text-[10px] text-slate-500">{iocConfidence}</div>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );

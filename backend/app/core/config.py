@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     # ✅ Local LLM (Ollama)
     OLLAMA_URL: str = Field(default="http://localhost:11434")
     OLLAMA_MODEL: str = Field(default="llama3:8b")
+    AI_INVESTIGATE_MODE: str = Field(default="all")
+    AI_INVESTIGATE_ON_CREATE: bool = Field(default=True)
+    AI_LOG_NOTES_MODE: str = Field(default="suspicious_only")
+    INCIDENT_AUTO_CREATE: bool = Field(default=True)
+    INCIDENT_DEDUP_WINDOW_SECONDS: int = Field(default=1800)
+    INCIDENT_MIN_SEVERITY: str = Field(default="medium")
 
     class Config:
         env_file = ".env"

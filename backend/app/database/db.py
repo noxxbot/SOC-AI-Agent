@@ -12,7 +12,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./soc_ai.db")
 engine = create_engine(DATABASE_URL)
 
 # SessionLocal for dependency injection in FastAPI
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
 
 # Base class for SQLAlchemy models
 class Base(DeclarativeBase):

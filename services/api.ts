@@ -1,4 +1,4 @@
-import { Agent, Telemetry, Incident, Severity, AlertAnalysisResponse } from '../types';
+import { Agent, Telemetry, Incident, Severity, AlertAnalysisResponse, ProcessedLog, Alert, Investigation } from '../types';
 
 // ✅ Use 127.0.0.1 for stability (avoid localhost mismatch issues)
 const BASE_URL = 'http://127.0.0.1:8000/api/v1';
@@ -77,5 +77,37 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ logs })
     });
+  },
+
+  async getProcessedLogs(limit: number = 100): Promise<ProcessedLog[]> {
+    return fetchJson(`${BASE_URL}/logs/processed/recent?limit=${limit}`);
+  },
+
+  async getProcessedLog(id: number): Promise<ProcessedLog> {
+    return fetchJson(`${BASE_URL}/logs/processed/${id}`);
+  },
+
+  async getDetectionAlerts(limit: number = 100): Promise<Alert[]> {
+    return fetchJson(`${BASE_URL}/detections/alerts?limit=${limit}`);
+  },
+
+  async getDetectionAlert(id: number): Promise<Alert> {
+    return fetchJson(`${BASE_URL}/detections/alerts/${id}`);
+  },
+
+  async runInvestigation(alert_id: number, force: boolean = true): Promise<Investigation> {
+    return fetchJson(`${BASE_URL}/ai/investigations/run/${alert_id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force })
+    });
+  },
+
+  async getInvestigations(alert_id: number): Promise<Investigation[]> {
+    return fetchJson(`${BASE_URL}/ai/investigations/alerts/${alert_id}`);
+  },
+
+  async getRecentIncidents(limit: number = 20): Promise<Incident[]> {
+    return fetchJson(`${BASE_URL}/incidents/recent?limit=${limit}`);
   }
 };

@@ -1,19 +1,16 @@
 
 import React from 'react';
+import { NavLink } from 'react-router-dom';
 
-interface SidebarProps {
-  activeTab: string;
-  setActiveTab: (tab: string) => void;
-}
-
-const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
+const Sidebar: React.FC = () => {
   const menuItems = [
-    { id: 'dashboard', icon: 'fa-chart-line', label: 'Dashboard' },
-    { id: 'incidents', icon: 'fa-shield-virus', label: 'Incidents' },
-    { id: 'agents', icon: 'fa-server', label: 'Endpoints' },
-    { id: 'log-analysis', icon: 'fa-file-code', label: 'Log Analysis' },
-    { id: 'threat-intel', icon: 'fa-globe', label: 'Threat Intel' },
-    { id: 'live-ops', icon: 'fa-headset', label: 'Live Ops Assistant' },
+    { path: '/', icon: 'fa-chart-line', label: 'Dashboard' },
+    { path: '/incidents', icon: 'fa-shield-virus', label: 'Incidents' },
+    { path: '/agents', icon: 'fa-server', label: 'Endpoints' },
+    { path: '/log-analysis', icon: 'fa-file-code', label: 'Log Analysis' },
+    { path: '/detections', icon: 'fa-bell', label: 'Detections' },
+    { path: '/threat-intel', icon: 'fa-globe', label: 'Threat Intel' },
+    { path: '/live-ops', icon: 'fa-headset', label: 'Live Ops Assistant' },
   ];
 
   return (
@@ -28,18 +25,21 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
 
         <nav className="space-y-2">
           {menuItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setActiveTab(item.id)}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
-                activeTab === item.id
-                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
-              }`}
+            <NavLink
+              key={item.path}
+              to={item.path}
+              end={item.path === '/'}
+              className={({ isActive }) =>
+                `w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
+                  isActive
+                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                    : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
+                }`
+              }
             >
               <i className={`fa-solid ${item.icon} w-5`}></i>
               <span className="font-medium">{item.label}</span>
-            </button>
+            </NavLink>
           ))}
         </nav>
       </div>

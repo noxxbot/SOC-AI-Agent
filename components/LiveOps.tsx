@@ -1,19 +1,11 @@
 
-import React, { useState, useRef, useEffect } from 'react';
-import { getGeminiClient, decode, encode, decodeAudioData } from '../services/gemini';
-import { LiveServerMessage, Modality } from '@google/genai';
+import React, { useState, useEffect } from 'react';
 
 const LiveOps: React.FC = () => {
   const [isActive, setIsActive] = useState(false);
   const [transcription, setTranscription] = useState<string[]>([]);
   const [status, setStatus] = useState<'idle' | 'connecting' | 'listening' | 'speaking'>('idle');
   
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const sessionRef = useRef<any>(null);
-  const outputAudioContextRef = useRef<AudioContext | null>(null);
-  const nextStartTimeRef = useRef<number>(0);
-  const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
-
   const toggleSession = async () => {
     if (isActive) {
       stopSession();
@@ -27,88 +19,7 @@ const LiveOps: React.FC = () => {
     setIsActive(true);
 
     try {
-      // Create fresh client instance before connecting
-      const ai = getGeminiClient();
-      
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      audioContextRef.current = inputCtx;
-      outputAudioContextRef.current = outputCtx;
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-      const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
-        callbacks: {
-          onopen: () => {
-            setStatus('listening');
-            const source = inputCtx.createMediaStreamSource(stream);
-            const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
-            
-            scriptProcessor.onaudioprocess = (e) => {
-              const inputData = e.inputBuffer.getChannelData(0);
-              const l = inputData.length;
-              const int16 = new Int16Array(l);
-              for (let i = 0; i < l; i++) {
-                int16[i] = inputData[i] * 32768;
-              }
-              const pcmBlob = {
-                data: encode(new Uint8Array(int16.buffer)),
-                mimeType: 'audio/pcm;rate=16000',
-              };
-              // Correct: Use sessionPromise to ensure data is sent to a resolved session
-              sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob }));
-            };
-
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(inputCtx.destination);
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            if (message.serverContent?.outputTranscription) {
-               const text = message.serverContent.outputTranscription.text;
-               setTranscription(prev => [...prev, `AI: ${text}`]);
-            }
-            if (message.serverContent?.inputTranscription) {
-              const text = message.serverContent.inputTranscription.text;
-              setTranscription(prev => [...prev, `You: ${text}`]);
-           }
-
-            const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-            if (audioData) {
-              setStatus('speaking');
-              // Correct: Scheduling the next audio chunk using nextStartTimeRef
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputCtx.currentTime);
-              const decodedBuffer = await decodeAudioData(decode(audioData), outputCtx, 24000, 1);
-              const source = outputCtx.createBufferSource();
-              source.buffer = decodedBuffer;
-              source.connect(outputCtx.destination);
-              source.onended = () => {
-                sourcesRef.current.delete(source);
-                if (sourcesRef.current.size === 0) setStatus('listening');
-              };
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += decodedBuffer.duration;
-              sourcesRef.current.add(source);
-            }
-            
-            if (message.serverContent?.interrupted) {
-              sourcesRef.current.forEach(s => s.stop());
-              sourcesRef.current.clear();
-              nextStartTimeRef.current = 0;
-            }
-          },
-          onerror: (e) => console.error('Live API Error:', e),
-          onclose: () => stopSession(),
-        },
-        config: {
-          responseModalities: [Modality.AUDIO],
-          outputAudioTranscription: {},
-          inputAudioTranscription: {},
-          systemInstruction: "You are Sentinel AI, a tactical SOC operations assistant. You help security analysts with real-time triage, answering questions about threats, and providing guidance on incident response procedures. Keep your responses concise and professional."
-        }
-      });
-
-      sessionRef.current = await sessionPromise;
+      setStatus('listening');
     } catch (err) {
       console.error(err);
       setIsActive(false);
@@ -119,9 +30,6 @@ const LiveOps: React.FC = () => {
   const stopSession = () => {
     setIsActive(false);
     setStatus('idle');
-    sessionRef.current?.close();
-    audioContextRef.current?.close();
-    outputAudioContextRef.current?.close();
   };
 
   useEffect(() => {
