@@ -1,7 +1,9 @@
 import json
 import os
+import hashlib
+import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 
 from app.database.db import SessionLocal
 from app.models.models import ProcessedLog
@@ -155,6 +157,108 @@ def _load_rules():
     ]
 
 
+def _bucket_time(ts: Optional[datetime], window_seconds: int) -> str:
+    base = ts or datetime.now(timezone.utc)
+    bucket_seconds = max(1, window_seconds)
+    epoch = int(base.timestamp())
+    bucket = epoch - (epoch % bucket_seconds)
+    return datetime.fromtimestamp(bucket, tz=timezone.utc).isoformat()
+
+
+def _signal_fingerprint(key: str, ts: Optional[datetime], window_seconds: int) -> str:
+    bucket = _bucket_time(ts, window_seconds)
+    payload = f"RULE-SIGNAL|{key}|{bucket}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _has_encoded_command(event: Dict[str, Any]) -> bool:
+    tags = event.get("tags") or []
+    raw = str(event.get("raw") or "").lower()
+    message = str(event.get("message") or "").lower()
+    combined = f"{raw} {message}"
+    return "encoded_command" in tags or ("powershell" in combined and ("-enc" in combined or "-encodedcommand" in combined))
+
+
+def _has_mitre_matches(event: Dict[str, Any]) -> bool:
+    return len(event.get("mitre_matches") or []) > 0
+
+
+def _has_ioc_matches(event: Dict[str, Any]) -> bool:
+    ioc_intel = event.get("ioc_intel") or {}
+    matches = ioc_intel.get("ioc_matches") or []
+    if matches:
+        return True
+    iocs = event.get("iocs") or {}
+    return any(iocs.get(k) for k in ["ips", "domains", "sha256", "md5", "cves"])
+
+
+def _has_correlation_hit(event: Dict[str, Any], findings: List[Dict[str, Any]]) -> bool:
+    event_id = event.get("id")
+    fingerprint = event.get("fingerprint")
+    hostname = event.get("hostname")
+    agent_id = event.get("agent_id")
+    for finding in findings or []:
+        for evidence in finding.get("evidence") or []:
+            if event_id is not None and evidence.get("event_id") == event_id:
+                return True
+            if fingerprint and evidence.get("fingerprint") == fingerprint:
+                return True
+        entities = finding.get("entities") or {}
+        if hostname and entities.get("hostname") == hostname:
+            return True
+        if agent_id and entities.get("agent_id") == agent_id:
+            return True
+    return False
+
+
+def _build_signal_alert(
+    event: Dict[str, Any],
+    window_seconds: int,
+    reasons: List[str]
+) -> Dict[str, Any]:
+    alert_id = str(uuid.uuid4())
+    fingerprint_key = event.get("fingerprint") or str(event.get("id") or alert_id)
+    fingerprint = _signal_fingerprint(fingerprint_key, event.get("ts"), window_seconds)
+    summary = "Signal detected: " + ", ".join(reasons)
+    evidence = {
+        "event_ids": [event.get("event_id")] if event.get("event_id") else [],
+        "processed_ids": [event.get("id")] if event.get("id") is not None else [],
+        "fingerprints": [event.get("fingerprint")] if event.get("fingerprint") else [],
+        "summary": summary
+    }
+    return {
+        "alert_id": alert_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "rule_id": "RULE-SIGNAL",
+        "rule_name": "Signal Detected",
+        "severity": "low",
+        "confidence_score": 25,
+        "category": "signal",
+        "mitre": event.get("mitre_matches") or [],
+        "ioc_matches": (event.get("ioc_intel") or {}).get("ioc_matches") or [],
+        "evidence": {**evidence, "alert_id": alert_id},
+        "recommended_actions": [
+            "Review the triggering signal in context",
+            "Confirm whether the activity is expected",
+            "Run AI investigation for deeper assessment"
+        ],
+        "status": "open",
+        "fingerprint": fingerprint,
+        "summary": summary
+    }
+
+
+def _collect_alert_coverage(alerts: List[Dict[str, Any]]) -> Dict[str, Set[Any]]:
+    coverage = {"event_ids": set(), "processed_ids": set(), "fingerprints": set()}
+    for alert in alerts or []:
+        evidence = alert.get("evidence") or {}
+        for key in ["event_ids", "processed_ids", "fingerprints"]:
+            values = evidence.get(key) or []
+            if isinstance(values, list):
+                coverage[key].update(values)
+    return coverage
+
+
 def run_rule_engine() -> Dict[str, Any]:
     """
     Executes all detection rules over recent processed logs and correlation findings.
@@ -176,7 +280,38 @@ def run_rule_engine() -> Dict[str, Any]:
 
     alerts: List[Dict[str, Any]] = []
     for rule in rules:
-        alerts.extend(rule.evaluate(logs, findings, context))
+        try:
+            alerts.extend(rule.evaluate(logs, findings, context))
+        except Exception:
+            # Prevent a single broken rule from stopping the entire engine
+            continue
+
+    coverage = _collect_alert_coverage(alerts)
+    signal_alerts: List[Dict[str, Any]] = []
+    for event in logs:
+        event_id = event.get("event_id")
+        processed_id = event.get("id")
+        fingerprint = event.get("fingerprint")
+        if (
+            (event_id and event_id in coverage["event_ids"])
+            or (processed_id is not None and processed_id in coverage["processed_ids"])
+            or (fingerprint and fingerprint in coverage["fingerprints"])
+        ):
+            continue
+        reasons: List[str] = []
+        if _has_mitre_matches(event):
+            reasons.append("MITRE match")
+        if _has_encoded_command(event):
+            reasons.append("Encoded command")
+        if _has_ioc_matches(event):
+            reasons.append("IOC signal")
+        if _has_correlation_hit(event, findings):
+            reasons.append("Correlation hit")
+        if not reasons:
+            continue
+        signal_alerts.append(_build_signal_alert(event, window_seconds, reasons))
+
+    alerts.extend(signal_alerts)
 
     return {
         "processed_logs_checked": len(logs),

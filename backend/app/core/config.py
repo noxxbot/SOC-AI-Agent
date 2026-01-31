@@ -18,9 +18,12 @@ class Settings(BaseSettings):
     AI_INVESTIGATE_MODE: str = Field(default="all")
     AI_INVESTIGATE_ON_CREATE: bool = Field(default=True)
     AI_LOG_NOTES_MODE: str = Field(default="suspicious_only")
+    AI_MAX_RETRIES: int = Field(default=2)
+    AI_RETRY_DELAY_SECONDS: int = Field(default=2)
     INCIDENT_AUTO_CREATE: bool = Field(default=True)
     INCIDENT_DEDUP_WINDOW_SECONDS: int = Field(default=1800)
     INCIDENT_MIN_SEVERITY: str = Field(default="medium")
+    INCIDENT_AI_MIN_CONFIDENCE: int = Field(default=60)
 
     class Config:
         env_file = ".env"

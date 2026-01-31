@@ -6,7 +6,6 @@ pydantic-settings
 sqlalchemy
 psycopg2-binary
 python-multipart
-google-generativeai
 cors
 psutil
 requests

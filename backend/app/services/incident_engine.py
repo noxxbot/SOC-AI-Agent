@@ -28,6 +28,14 @@ def _parse_json(value: Optional[str], fallback: Any) -> Any:
         return fallback
 
 
+def _ensure_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _severity_rank(value: Optional[str]) -> int:
     sev = str(value or "").strip().lower()
     mapping = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -46,9 +54,10 @@ def _bucket_time(ts: datetime, bucket_seconds: int) -> str:
 
 
 def _serialize_processed_log(log: ProcessedLog) -> Dict[str, Any]:
+    ts = _ensure_utc(log.timestamp)
     return {
         "id": log.id,
-        "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+        "timestamp": ts.isoformat() if ts else None,
         "agent_id": log.agent_id,
         "hostname": log.hostname,
         "category": log.category,
@@ -99,7 +108,7 @@ def _build_context(db: Session, alert: DetectionAlert) -> Dict[str, Any]:
 
     if not related_logs:
         window_seconds = int(os.getenv("RULE_WINDOW_SECONDS", "600"))
-        center = alert.created_at or datetime.now(timezone.utc)
+        center = _ensure_utc(alert.created_at) or datetime.now(timezone.utc)
         start = center - timedelta(seconds=window_seconds)
         end = center + timedelta(seconds=window_seconds)
         query = db.query(ProcessedLog).filter(ProcessedLog.timestamp >= start, ProcessedLog.timestamp <= end)
@@ -111,7 +120,7 @@ def _build_context(db: Session, alert: DetectionAlert) -> Dict[str, Any]:
     processed_logs = [_serialize_processed_log(log) for log in unique_logs.values()]
 
     window_seconds = int(os.getenv("RULE_WINDOW_SECONDS", "600"))
-    center = alert.created_at or datetime.now(timezone.utc)
+    center = _ensure_utc(alert.created_at) or datetime.now(timezone.utc)
     start = center - timedelta(seconds=window_seconds)
     end = center + timedelta(seconds=window_seconds)
     findings = (
@@ -131,9 +140,10 @@ def _build_context(db: Session, alert: DetectionAlert) -> Dict[str, Any]:
     )
     ai_investigation = None
     if ai_row:
+        created_at = _ensure_utc(ai_row.created_at)
         ai_investigation = {
             "id": ai_row.id,
-            "created_at": ai_row.created_at.isoformat() if ai_row.created_at else None,
+            "created_at": created_at.isoformat() if created_at else None,
             "status": ai_row.status,
             "investigation": _parse_json(ai_row.investigation_json, {}),
             "confidence_score": ai_row.confidence_score,
@@ -335,7 +345,9 @@ def decide_incident(alert: DetectionAlert, context: Dict[str, Any]) -> Dict[str,
 
     decision_severity = alert_sev
     if ai_trigger and ai_investigation.get("incident_severity"):
-        decision_severity = _normalize_severity(ai_investigation.get("incident_severity"))
+        ai_severity = _normalize_severity(ai_investigation.get("incident_severity"))
+        if _severity_rank(ai_severity) > _severity_rank(decision_severity):
+            decision_severity = ai_severity
     elif ioc_trigger or correlation_trigger or mitre_trigger:
         decision_severity = "high" if _severity_rank(alert_sev) < 3 else alert_sev
 
@@ -462,8 +474,38 @@ async def run_incident_task(alert_id: int) -> None:
         alert = db.query(DetectionAlert).filter(DetectionAlert.id == alert_id).first()
         if not alert:
             return
+        ai_row = (
+            db.query(AIInvestigation)
+            .filter(AIInvestigation.alert_id == alert.id)
+            .order_by(AIInvestigation.created_at.desc())
+            .first()
+        )
+        threshold = int(getattr(settings, "INCIDENT_AI_MIN_CONFIDENCE", 60) or 60)
+        if (
+            not ai_row
+            or ai_row.status != "completed"
+            or not ai_row.is_incident
+            or int(ai_row.confidence_score or 0) < threshold
+        ):
+            logger.info(
+                "incident skipped (ai gating)",
+                extra={
+                    "alert_id": alert_id,
+                    "status": ai_row.status if ai_row else None,
+                    "is_incident": ai_row.is_incident if ai_row else None,
+                    "confidence_score": ai_row.confidence_score if ai_row else None,
+                    "threshold": threshold
+                }
+            )
+            return
         context = _build_context(db, alert)
         decision = decide_incident(alert, context)
+        decision["should_create"] = True
+        decision["confidence_score"] = max(int(decision.get("confidence_score") or 0), int(ai_row.confidence_score or 0))
+        decision["source"] = "ai_investigation"
+        decision["reason"] = "AI investigation confirmed incident"
+        decision["summary"] = alert.summary or decision.get("summary") or "AI investigation confirmed incident"
+        decision["severity"] = ai_row.incident_severity or decision.get("severity") or "low"
         create_or_link_incident(db, decision, alert)
     except Exception:
         logger.exception("incident task error", extra={"alert_id": alert_id})

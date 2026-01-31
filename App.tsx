@@ -1,18 +1,20 @@
 
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import LogAnalyzer from './components/LogAnalyzer';
 import ThreatIntel from './components/ThreatIntel';
 import LiveOps from './components/LiveOps';
 import IncidentsList from './components/IncidentsList';
+import IncidentDetail from './components/IncidentDetail';
 import AgentsList from './components/AgentsList';
 import AgentDetail from './components/AgentDetail';
 import Detections from './components/Detections';
 import LogDetails from './components/LogDetails';
 import DetectionDetail from './components/DetectionDetail';
-import { Agent } from './types';
+import { Agent, Incident } from './types';
+import { api } from './services/api';
 
 const App: React.FC = () => {
   const [notification, setNotification] = useState<{title: string, severity: string} | null>(null);
@@ -93,6 +95,7 @@ const App: React.FC = () => {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/incidents" element={<IncidentsList />} />
+              <Route path="/incidents/:incident_id" element={<IncidentPage />} />
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/log-analysis" element={<LogAnalyzer />} />
               <Route path="/log-analysis/:processed_log_id" element={<LogDetails />} />
@@ -127,4 +130,64 @@ const AgentsPage: React.FC = () => {
   ) : (
     <AgentsList onSelectAgent={handleSelectAgent} />
   );
+};
+
+const IncidentPage: React.FC = () => {
+  const { incident_id } = useParams();
+  const navigate = useNavigate();
+  const [incident, setIncident] = useState<Incident | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!incident_id) {
+      setError('No incident ID provided.');
+      return;
+    }
+    const incidentId = Number(incident_id);
+    if (Number.isNaN(incidentId)) {
+      setError('Invalid incident ID.');
+      return;
+    }
+    const fetchIncident = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await api.getIncident(incidentId);
+        setIncident(data);
+      } catch (err: any) {
+        setError(err?.message || 'Failed to load incident.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchIncident();
+  }, [incident_id]);
+
+  if (loading) {
+    return (
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-10 text-center text-slate-500">
+        <i className="fa-solid fa-spinner fa-spin text-2xl mb-3"></i>
+        <div className="text-xs uppercase tracking-widest">Loading incident</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-rose-500/10 border border-rose-500/30 rounded-2xl px-4 py-3 text-rose-300 text-sm">
+        {error}
+      </div>
+    );
+  }
+
+  if (!incident) {
+    return (
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-10 text-center text-slate-500">
+        No incident found.
+      </div>
+    );
+  }
+
+  return <IncidentDetail incident={incident} onBack={() => navigate(-1)} />;
 };

@@ -102,6 +102,7 @@ export interface Alert {
   recommended_actions: string[];
   fingerprint?: string | null;
   investigated?: boolean;
+  incident_id?: number | null;
 }
 
 export interface Investigation {
@@ -116,6 +117,10 @@ export interface Investigation {
   incident_severity: string;
   status: string;
   error_message?: string | null;
+  failure_reason?: string | null;
+  retry_count?: number | null;
+  last_retry_reason?: string | null;
+  raw_response?: string | null;
 }
 
 export interface AnalysisResult {
@@ -130,6 +135,11 @@ export interface AnalysisResult {
     reconnaissance: number;
     credentialAccess: number;
   };
+  severity?: string;
+  should_alert?: boolean;
+  should_incident?: boolean;
+  analysis_source?: string;
+  fail_closed?: boolean;
 }
 
 export interface AlertAnalysisResponse {

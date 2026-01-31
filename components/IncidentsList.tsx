@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Incident } from '../types';
 import { api } from '../services/api';
 
@@ -7,6 +8,7 @@ const IncidentsList: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastSync, setLastSync] = useState<Date | null>(null);
+  const navigate = useNavigate();
 
   const fetchIncidents = async () => {
     setLoading(true);
@@ -86,7 +88,11 @@ const IncidentsList: React.FC = () => {
               </tr>
             ) : (
               incidents.map((incident) => (
-                <tr key={incident.id} className="border-b border-slate-800">
+                <tr
+                  key={incident.id}
+                  onClick={() => navigate(`/incidents/${incident.id}`)}
+                  className="border-b border-slate-800 hover:bg-slate-800/40 cursor-pointer"
+                >
                   <td className="px-4 py-3">
                     <div className="text-xs font-mono text-emerald-400">INC-{incident.id}</div>
                     <div className="text-slate-200">{incident.title || 'Untitled incident'}</div>

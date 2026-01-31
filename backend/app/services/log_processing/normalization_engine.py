@@ -1,7 +1,10 @@
 import json
 import uuid
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_timestamp(value: Any, fallback: Any) -> str:
@@ -117,7 +120,79 @@ def _severity_score(severity_raw: str, event_type: str, fields: Dict[str, Any]) 
     }.get(sr, 20)
     if event_type in {"failed_login", "cpu_high", "ram_high"}:
         base = min(100, base + 10)
-    return int(max(0, min(100, base)))
+    mitre_matches = fields.get("mitre_matches") or []
+    ioc_matches = []
+    ioc_intel = fields.get("ioc_intel") or {}
+    if isinstance(ioc_intel, dict):
+        ioc_matches = ioc_intel.get("ioc_matches") or []
+    if not ioc_matches:
+        ioc_matches = fields.get("ioc_matches") or []
+    boost = 0
+    high_risk = False
+    high_risk_ids = {"T1059.001", "T1059", "T1027", "T1105", "T1071"}
+    for match in mitre_matches:
+        if not isinstance(match, dict):
+            continue
+        technique_id = str(match.get("technique_id") or match.get("id") or "").strip()
+        try:
+            confidence = int(match.get("confidence_score") or 0)
+        except Exception:
+            confidence = 0
+        if confidence >= 80:
+            candidate = 40
+        elif confidence >= 60:
+            candidate = 25
+        elif confidence >= 40:
+            candidate = 15
+        else:
+            candidate = 0
+        if candidate:
+            logger.info("MITRE severity boost applied", extra={"technique": technique_id, "boost": candidate})
+            boost += candidate
+        if technique_id in high_risk_ids:
+            high_risk = True
+    ioc_boost = 0
+    malicious_count = 0
+    suspicious_count = 0
+    unknown_count = 0
+    for match in ioc_matches:
+        if not isinstance(match, dict):
+            continue
+        verdict = str(match.get("verdict") or "").strip().lower()
+        ioc_value = str(match.get("ioc") or "").strip()
+        ioc_type = str(match.get("type") or "").strip().lower()
+        if verdict == "malicious":
+            value = 40
+            malicious_count += 1
+            if ioc_type in {"ip", "ipv4", "ipv6"}:
+                value += 15
+            elif ioc_type in {"domain", "hostname", "fqdn"}:
+                value += 10
+            elif ioc_type in {"sha256", "md5", "hash"}:
+                value += 20
+        elif verdict == "suspicious":
+            value = 25
+            suspicious_count += 1
+        elif verdict == "unknown":
+            value = 10
+            unknown_count += 1
+        elif verdict == "benign":
+            value = 0
+        else:
+            value = 0
+        if value:
+            logger.info("IOC severity boost applied", extra={"ioc": ioc_value, "verdict": verdict, "boost": value})
+            ioc_boost += value
+    total = min(100, base + boost + ioc_boost)
+    if high_risk:
+        total = max(total, 60)
+    if malicious_count:
+        total = max(total, 75)
+    if suspicious_count >= 2:
+        total = max(total, 60)
+    if unknown_count >= 3:
+        total = max(total, 40)
+    return int(max(0, min(100, total)))
 
 
 def _build_message(event_type: str, fields: Dict[str, Any]) -> str:

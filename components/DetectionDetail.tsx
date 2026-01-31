@@ -99,6 +99,15 @@ const DetectionDetail: React.FC = () => {
   const latestDetails = latestInvestigation?.investigation || {};
   const isIncident = latestInvestigation?.is_incident ?? false;
   const incidentSeverity = isIncident ? latestInvestigation?.incident_severity || 'low' : 'none';
+  const incidentId = useMemo(() => {
+    const raw = alert?.incident_id ?? (alert?.evidence as any)?.incident_id;
+    if (typeof raw === 'number') return raw;
+    if (typeof raw === 'string' && raw.trim()) {
+      const parsed = Number(raw);
+      return Number.isNaN(parsed) ? null : parsed;
+    }
+    return null;
+  }, [alert]);
   const latestTimeline = useMemo(() => {
     const timeline = (latestDetails as any)?.timeline;
     if (!Array.isArray(timeline)) return [];
@@ -165,6 +174,15 @@ const DetectionDetail: React.FC = () => {
             <p className="text-slate-500 text-sm">Alert evidence, MITRE mapping, and AI investigation output</p>
           </div>
         </div>
+        {incidentId ? (
+          <button
+            onClick={() => navigate(`/incidents/${incidentId}`)}
+            className="bg-slate-900 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 hover:border-emerald-500/60 px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all"
+          >
+            <i className="fa-solid fa-shield-halved"></i>
+            View Incident
+          </button>
+        ) : null}
       </header>
 
       {error && (
@@ -387,6 +405,9 @@ const DetectionDetail: React.FC = () => {
                         </div>
                       </div>
                       <div className="text-sm text-slate-200 truncate">{summary}</div>
+                      {['failed', 'error'].includes((inv.status || '').toLowerCase()) ? (
+                        <div className="text-xs text-rose-300">AI failed – manual review needed</div>
+                      ) : null}
                       <div className="flex flex-wrap items-center gap-2 text-xs">
                         <span
                           className={`border px-2 py-0.5 rounded-full ${incidentFlag ? 'bg-rose-500/20 text-rose-300 border-rose-500/30' : 'bg-slate-800 text-slate-400 border-slate-700'}`}

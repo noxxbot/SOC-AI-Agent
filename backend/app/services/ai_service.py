@@ -1,29 +1,58 @@
 import os
 import json
 import re
+import asyncio
 import httpx
-from typing import Dict, Any, List, Optional
+import logging
+import time
+from typing import Dict, Any, List, Optional, Tuple
+from app.core.config import settings
 
 
 class AIService:
     def __init__(self):
         self.ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
         self.model = os.getenv("OLLAMA_MODEL", "llama3:8b")
+        self.logger = logging.getLogger(__name__)
 
     async def _ask_ollama(self, prompt: str) -> str:
         url = f"{self.ollama_url}/api/generate"
 
         payload = {
-            "model": self.model,
+            "model": settings.OLLAMA_MODEL,
             "prompt": prompt,
-            "stream": False
+            "stream": False,
+            "format": "json",
+            "options": {
+                "temperature": 0,
+                "top_p": 0.1,
+                "repeat_penalty": 1.1
+            }
         }
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
             data = response.json()
             return data.get("response", "")
+
+    async def check_ollama_ready(self) -> bool:
+        url = f"{self.ollama_url}/api/tags"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                payload = response.json()
+        except Exception as exc:
+            self.logger.error(f"Ollama ping failed at {url}: {exc}")
+            return False
+        models = payload.get("models") or []
+        names = [str(m.get("name") or "") for m in models if isinstance(m, dict)]
+        self.logger.info(f"Ollama models available: {names}")
+        if self.model not in names:
+            self.logger.error(f"Ollama model not found: {self.model}. Available: {names}")
+            return False
+        return True
 
     # =========================================================
     # Phase 3: LLM Output Cleaning / Safety
@@ -42,20 +71,20 @@ class AIService:
 
         return cleaned
 
-    def _extract_json_from_text(self, text: str) -> str:
-        """
-        Sometimes model returns extra text before/after JSON.
-        This tries to extract the first valid JSON object block.
-        """
-        if not text:
-            return ""
-
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return text[start:end + 1]
-
-        return text
+    def _extract_json_from_text(self, text: str):
+        import re
+        import json
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except Exception:
+                return None
+        return None
 
     def _normalize_bool(self, value: Any) -> bool:
         """
@@ -123,27 +152,69 @@ class AIService:
 
         return default_tv
 
-    def _safe_default_analysis(self, explanation: str) -> Dict[str, Any]:
-        """
-        Safe fallback if JSON parsing fails.
-        Always returns schema expected by FastAPI response model.
-        """
+    def _safe_default_analysis(self, alert: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        alert_id = None
+        if isinstance(alert, dict):
+            alert_id = alert.get("id") or alert.get("alert_id")
+        self.logger.warning("AI fail-closed fallback triggered", extra={"alert_id": alert_id})
         return {
-            "riskScore": 60,
-            "threatDetected": True,
+            "summary": "AI failed – manual review needed.",
+            "case_notes": "AI failed – manual review needed.",
+            "explainability": ["AI failure — no reliable analysis"],
+            "assessment": {
+                "is_incident": False,
+                "incident_severity": "none",
+                "confidence_score": 0,
+                "reasoning": "AI investigation failed or returned invalid output"
+            },
+            "recommended_actions": [],
+            "ioc_analysis": {
+                "observed_iocs": [],
+                "ioc_verdict": "unknown",
+                "ioc_notes": "AI investigation failed or returned invalid output"
+            },
+            "mitre_analysis": {
+                "techniques": [],
+                "tactics": [],
+                "mitre_notes": "AI investigation failed or returned invalid output"
+            },
+            "timeline": ["Step 1: AI investigation failed before a conclusion was reached."],
+            "mitre_mapping": [],
+            "ioc_verdicts": [],
+            "confidence_score": 0,
+            "is_incident": False,
+            "incident_severity": "none",
+            "confidence_breakdown": {},
+            "status": "failed",
+            "error_message": "ai_failure",
+            "error": "ai_failure"
+        }
+
+    def _safe_default_log_analysis(self, explanation: str, manual_override: bool = False) -> Dict[str, Any]:
+        """
+        This fallback must never trigger alerts or incidents.
+        It exists only to provide safe defaults in manual workflows.
+        """
+        if manual_override is not True:
+            self.logger.warning("SAFE DEFAULT ANALYSIS USED - FAIL CLOSED", extra={"manual_override": False})
+        else:
+            self.logger.warning("SAFE DEFAULT ANALYSIS USED - FAIL CLOSED", extra={"manual_override": True})
+        return {
+            "riskScore": 0,
+            "threatDetected": False,
+            "severity": "low",
+            "should_alert": False,
+            "should_incident": False,
+            "analysis_source": "safe_default_fallback",
+            "fail_closed": True,
             "explanation": explanation,
-            "recommendations": [
-                "Review authentication logs for abnormal patterns",
-                "Block suspicious IP temporarily (if confirmed malicious)",
-                "Enable MFA for privileged accounts",
-                "Reset passwords for impacted users"
-            ],
+            "recommendations": [],
             "threatVectors": {
                 "persistence": False,
                 "lateralMovement": False,
                 "exfiltration": False,
-                "reconnaissance": True,
-                "credentialAccess": True
+                "reconnaissance": False,
+                "credentialAccess": False
             }
         }
 
@@ -466,13 +537,9 @@ Log Context:
                 "error": "LLM unavailable"
             }
 
+        self.logger.info("AI raw output", extra={"raw_output": raw_output})
         cleaned = self._clean_llm_output(raw_output)
-        extracted = self._extract_json_from_text(cleaned)
-        parsed: Dict[str, Any] = {}
-        try:
-            parsed = json.loads(extracted)
-        except Exception:
-            parsed = {}
+        parsed = self._extract_json_from_text(cleaned) or {}
 
         case_notes = str(parsed.get("case_notes") or "").strip()
         explainability = self._coerce_list(parsed.get("explainability"))
@@ -709,21 +776,20 @@ User Query:
         except Exception:
             return {"type": "analyst_question", "reason": "LLM unavailable; fallback to analyst_question"}
 
+        self.logger.info("AI raw output", extra={"raw_output": raw})
         cleaned = self._clean_llm_output(raw)
-        extracted = self._extract_json_from_text(cleaned)
-
-        try:
-            parsed = json.loads(extracted)
-            qtype = str(parsed.get("type", "")).strip()
-            reason = str(parsed.get("reason", "")).strip()
-
-            allowed = {"ioc_query", "mitre_query", "analyst_question", "out_of_scope", "unsafe_request"}
-            if qtype not in allowed:
-                return {"type": "analyst_question", "reason": "Classifier returned invalid type"}
-
-            return {"type": qtype, "reason": reason or "Classified successfully"}
-        except Exception:
+        parsed = self._extract_json_from_text(cleaned)
+        if not parsed:
+            self.logger.warning("AI returned non-JSON output", extra={"raw": raw})
             return {"type": "analyst_question", "reason": "Classifier JSON failed; fallback to analyst_question"}
+        qtype = str(parsed.get("type", "")).strip()
+        reason = str(parsed.get("reason", "")).strip()
+
+        allowed = {"ioc_query", "mitre_query", "analyst_question", "out_of_scope", "unsafe_request"}
+        if qtype not in allowed:
+            return {"type": "analyst_question", "reason": "Classifier returned invalid type"}
+
+        return {"type": qtype, "reason": reason or "Classified successfully"}
 
     # =========================================================
     # Phase 5 Step 3: Cybersecurity Guardrail (NEW)
@@ -886,47 +952,133 @@ Logs:
 """
 
         raw_output = await self._ask_ollama(prompt)
+        self.logger.info("AI raw output", extra={"raw_output": raw_output})
         cleaned = self._clean_llm_output(raw_output)
-        extracted = self._extract_json_from_text(cleaned)
+        parsed = self._extract_json_from_text(cleaned)
+        if not parsed:
+            self.logger.warning("AI returned non-JSON output", extra={"raw": raw_output})
+            return self._safe_default_log_analysis(raw_output, manual_override=True)
+
+        risk_score = parsed.get("riskScore", 50)
+        threat_detected = parsed.get("threatDetected", True)
+        explanation = parsed.get("explanation", "Suspicious activity detected based on log patterns.")
+        explanation = self._fix_explanation_if_json(explanation)
+        recommendations = parsed.get("recommendations", ["Review logs", "Investigate source"])
+        threat_vectors = parsed.get("threatVectors", {})
 
         try:
-            parsed = json.loads(extracted)
-
-            risk_score = parsed.get("riskScore", 50)
-            threat_detected = parsed.get("threatDetected", True)
-            explanation = parsed.get("explanation", "Suspicious activity detected based on log patterns.")
-            explanation = self._fix_explanation_if_json(explanation)
-            recommendations = parsed.get("recommendations", ["Review logs", "Investigate source"])
-            threat_vectors = parsed.get("threatVectors", {})
-
-            # Fix types
-            try:
-                risk_score = int(risk_score)
-            except Exception:
-                risk_score = 50
-
-            risk_score = int(max(0, min(100, risk_score)))
-            threat_detected = self._normalize_bool(threat_detected)
-
-            # Ensure recommendations is always list[str]
-            if not isinstance(recommendations, list):
-                recommendations = [str(recommendations)]
-
-            recommendations = [str(x) for x in recommendations if str(x).strip()]
-
-            # Normalize threatVectors to correct dict booleans
-            threat_vectors = self._normalize_threat_vectors(threat_vectors)
-
-            return {
-                "riskScore": risk_score,
-                "threatDetected": threat_detected,
-                "explanation": explanation,
-                "recommendations": recommendations,
-                "threatVectors": threat_vectors
-            }
-
+            risk_score = int(risk_score)
         except Exception:
-            return self._safe_default_analysis(raw_output)
+            risk_score = 50
+
+        risk_score = int(max(0, min(100, risk_score)))
+        threat_detected = self._normalize_bool(threat_detected)
+
+        if not isinstance(recommendations, list):
+            recommendations = [str(recommendations)]
+
+        recommendations = [str(x) for x in recommendations if str(x).strip()]
+
+        threat_vectors = self._normalize_threat_vectors(threat_vectors)
+
+        return {
+            "riskScore": risk_score,
+            "threatDetected": threat_detected,
+            "explanation": explanation,
+            "recommendations": recommendations,
+            "threatVectors": threat_vectors
+        }
+
+    async def _investigate_with_retry(
+        self,
+        prompt: str,
+        alert: Dict[str, Any],
+        context: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], str, str, int, Optional[str]]:
+        """
+        Retry exists only to handle transient LLM failures.
+        It must not override fail-closed logic.
+        """
+        max_retries = int(getattr(settings, "AI_MAX_RETRIES", 2) or 2)
+        delay = int(getattr(settings, "AI_RETRY_DELAY_SECONDS", 2) or 2)
+        max_retries = max(1, max_retries)
+        retry_count = 0
+        last_retry_reason = None
+        alert_id = None
+        if isinstance(alert, dict):
+            alert_id = alert.get("id") or alert.get("alert_id")
+        cleaned = ""
+        raw_response = ""
+        for attempt in range(max_retries):
+            if attempt > 0:
+                retry_count = attempt
+            try:
+                start = time.monotonic()
+                raw_response = await self._ask_ollama(prompt)
+                duration = time.monotonic() - start
+                self.logger.info(f"AI CALL DURATION={duration:.2f}s", extra={"alert_id": alert_id})
+                self.logger.info(f"RAW AI RESPONSE={raw_response}", extra={"alert_id": alert_id})
+                self.logger.info("AI raw output", extra={"raw_output": raw_response})
+                self.logger.warning("RAW LLM OUTPUT: %s", raw_response)
+            except httpx.TimeoutException:
+                last_retry_reason = "timeout"
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"AI retry {attempt + 1}/{max_retries} due to timeout", extra={"alert_id": alert_id})
+                    await asyncio.sleep(delay)
+                    continue
+                failure = self._safe_default_analysis(alert)
+                failure["error_message"] = "retry_exhausted"
+                return failure, "", raw_response, retry_count, last_retry_reason
+            except httpx.ConnectError:
+                last_retry_reason = "connection_error"
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"AI retry {attempt + 1}/{max_retries} due to connection_error", extra={"alert_id": alert_id})
+                    await asyncio.sleep(delay)
+                    continue
+                failure = self._safe_default_analysis(alert)
+                failure["error_message"] = "retry_exhausted"
+                return failure, "", raw_response, retry_count, last_retry_reason
+            except Exception:
+                failure = self._safe_default_analysis(alert)
+                return failure, "", raw_response, retry_count, last_retry_reason
+
+            cleaned = self._clean_llm_output(raw_response)
+            if not str(cleaned or "").strip():
+                last_retry_reason = "empty_response"
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"AI retry {attempt + 1}/{max_retries} due to empty_response", extra={"alert_id": alert_id})
+                    await asyncio.sleep(delay)
+                    continue
+                failure = self._safe_default_analysis(alert)
+                failure["error_message"] = "retry_exhausted"
+                return failure, cleaned or "", raw_response, retry_count, last_retry_reason
+            parsed = self._extract_json_from_text(cleaned)
+            if not parsed:
+                last_retry_reason = "json_parse_error"
+                self.logger.warning("AI returned non-JSON output", extra={"raw": raw_response})
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"AI retry {attempt + 1}/{max_retries} due to json_parse_error", extra={"alert_id": alert_id})
+                    await asyncio.sleep(delay)
+                    continue
+                fallback = {
+                    "summary": "AI output invalid",
+                    "is_incident": False,
+                    "confidence_score": 0,
+                    "incident_severity": "none",
+                    "case_notes": "Model returned non-JSON output"
+                }
+                normalized = self._normalize_investigation(
+                    fallback,
+                    alert,
+                    context,
+                    error_message="json_parse_error"
+                )
+                return normalized, cleaned or "", raw_response, retry_count, last_retry_reason
+            normalized = self._normalize_investigation(parsed, alert, context)
+            return normalized, cleaned, raw_response, retry_count, last_retry_reason
+        failure = self._safe_default_analysis(alert)
+        failure["error_message"] = "retry_exhausted"
+        return failure, cleaned, raw_response, retry_count, last_retry_reason
 
     # =========================================================
     # Existing: Alert Analysis (KEEP WORKING)
@@ -967,45 +1119,11 @@ Telemetry Context:
 """
 
         raw_output = await self._ask_ollama(prompt)
+        self.logger.info("AI raw output", extra={"raw_output": raw_output})
         cleaned = self._clean_llm_output(raw_output)
-        extracted = self._extract_json_from_text(cleaned)
-
-        try:
-            parsed = json.loads(extracted)
-
-            root_cause = str(parsed.get("root_cause", "Potential suspicious activity detected."))
-            mitre_mapping = parsed.get("mitre_mapping", ["T1110 Brute Force"])
-            confidence_score = parsed.get("confidence_score", 70)
-            response_actions = parsed.get("response_actions", [
-                "Investigate related authentication events",
-                "Enable MFA",
-                "Block suspicious IP",
-                "Monitor endpoint for persistence"
-            ])
-
-            if not isinstance(mitre_mapping, list):
-                mitre_mapping = [str(mitre_mapping)]
-            mitre_mapping = [str(x) for x in mitre_mapping if str(x).strip()]
-
-            try:
-                confidence_score = int(confidence_score)
-            except Exception:
-                confidence_score = 70
-
-            confidence_score = int(max(0, min(100, confidence_score)))
-
-            if not isinstance(response_actions, list):
-                response_actions = [str(response_actions)]
-            response_actions = [str(x) for x in response_actions if str(x).strip()]
-
-            return {
-                "root_cause": root_cause,
-                "mitre_mapping": mitre_mapping,
-                "confidence_score": confidence_score,
-                "response_actions": response_actions
-            }
-
-        except Exception:
+        parsed = self._extract_json_from_text(cleaned)
+        if not parsed:
+            self.logger.warning("AI returned non-JSON output", extra={"raw": raw_output})
             return {
                 "root_cause": raw_output,
                 "mitre_mapping": ["T1110 Brute Force"],
@@ -1017,6 +1135,38 @@ Telemetry Context:
                     "Monitor endpoint for persistence"
                 ]
             }
+
+        root_cause = str(parsed.get("root_cause", "Potential suspicious activity detected."))
+        mitre_mapping = parsed.get("mitre_mapping", ["T1110 Brute Force"])
+        confidence_score = parsed.get("confidence_score", 70)
+        response_actions = parsed.get("response_actions", [
+            "Investigate related authentication events",
+            "Enable MFA",
+            "Block suspicious IP",
+            "Monitor endpoint for persistence"
+        ])
+
+        if not isinstance(mitre_mapping, list):
+            mitre_mapping = [str(mitre_mapping)]
+        mitre_mapping = [str(x) for x in mitre_mapping if str(x).strip()]
+
+        try:
+            confidence_score = int(confidence_score)
+        except Exception:
+            confidence_score = 70
+
+        confidence_score = int(max(0, min(100, confidence_score)))
+
+        if not isinstance(response_actions, list):
+            response_actions = [str(response_actions)]
+        response_actions = [str(x) for x in response_actions if str(x).strip()]
+
+        return {
+            "root_cause": root_cause,
+            "mitre_mapping": mitre_mapping,
+            "confidence_score": confidence_score,
+            "response_actions": response_actions
+        }
 
     def _extract_investigation_inputs(self, alert: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         alert = alert or {}
@@ -1035,21 +1185,55 @@ Telemetry Context:
                 if value and value not in extracted[key]:
                     extracted[key].append(value)
 
-        processed_logs = context.get("processed_logs") or []
-        for log in processed_logs:
-            iocs = log.get("iocs") or {}
-            _add_iocs("ips", iocs.get("ips") or [])
-            _add_iocs("domains", iocs.get("domains") or [])
-            _add_iocs("sha256", iocs.get("sha256") or [])
-            _add_iocs("md5", iocs.get("md5") or [])
-            _add_iocs("cves", iocs.get("cves") or [])
-            fields = log.get("fields") or {}
-            ioc_intel = fields.get("ioc_intel") or {}
-            if ioc_intel:
-                mapped_ioc_intel.append(ioc_intel)
-            mitre = fields.get("mitre_matches") or []
+        key_events = context.get("key_events") or []
+        for event in key_events:
+            ioc_matches = event.get("ioc_matches") or []
+            if isinstance(ioc_matches, list) and ioc_matches:
+                mapped_ioc_intel.append({"ioc_matches": ioc_matches})
+            for match in ioc_matches:
+                if not isinstance(match, dict):
+                    continue
+                value = str(match.get("ioc") or match.get("value") or "").strip()
+                if not value:
+                    continue
+                ioc_type = str(match.get("type") or "").strip().lower()
+                if not ioc_type:
+                    ioc_type = self._infer_ioc_type(value)
+                if ioc_type == "ip":
+                    _add_iocs("ips", value)
+                elif ioc_type == "domain":
+                    _add_iocs("domains", value)
+                elif ioc_type == "sha256":
+                    _add_iocs("sha256", value)
+                elif ioc_type == "md5":
+                    _add_iocs("md5", value)
+                elif ioc_type == "cve":
+                    _add_iocs("cves", value)
+            mitre = event.get("mitre_matches") or []
             if isinstance(mitre, list):
                 mitre_matches.extend([m for m in mitre if isinstance(m, dict)])
+
+        ioc_summary = context.get("ioc_summary") or {}
+        for item in ioc_summary.get("high_confidence_iocs") or []:
+            if isinstance(item, dict):
+                mapped_ioc_intel.append({"ioc_matches": [item]})
+                value = str(item.get("ioc") or "").strip()
+                if value:
+                    inferred = self._infer_ioc_type(value)
+                    if inferred == "ip":
+                        _add_iocs("ips", value)
+                    elif inferred == "domain":
+                        _add_iocs("domains", value)
+                    elif inferred == "sha256":
+                        _add_iocs("sha256", value)
+                    elif inferred == "md5":
+                        _add_iocs("md5", value)
+                    elif inferred == "cve":
+                        _add_iocs("cves", value)
+
+        mitre_summary = context.get("mitre_summary") or []
+        if isinstance(mitre_summary, list):
+            mitre_matches.extend([m for m in mitre_summary if isinstance(m, dict)])
 
         alert_ioc_matches = alert.get("ioc_matches") or alert.get("ioc_intel") or []
         if isinstance(alert_ioc_matches, list):
@@ -1088,7 +1272,7 @@ Telemetry Context:
         for key in ["processed_ids", "fingerprints"]:
             for value in evidence.get(key) or []:
                 excluded.add(str(value))
-        processed_logs = context.get("processed_logs") or []
+        processed_logs = context.get("key_events") or []
         for log in processed_logs:
             if log.get("id") is not None:
                 excluded.add(str(log.get("id")))
@@ -1207,8 +1391,8 @@ Telemetry Context:
             verdict = str(item.get("verdict") or "unknown")
             ioc = str(item.get("ioc") or "")
             reasons.append(f"IOC {ioc} classified as {verdict}")
-        correlation_findings = context.get("correlation_findings") or []
-        if correlation_findings:
+        risk_signals = context.get("risk_signals") or []
+        if risk_signals:
             reasons.append("Correlation findings present for related activity")
         if not reasons:
             reasons.append("Limited evidence available beyond alert metadata")
@@ -1221,7 +1405,7 @@ Telemetry Context:
         ioc_items: List[Dict[str, Any]],
         alert: Dict[str, Any]
     ) -> Dict[str, int]:
-        correlation_findings = context.get("correlation_findings") or []
+        correlation_findings = context.get("risk_signals") or []
         rule_weight = 20
         severity = str((alert or {}).get("severity") or "").lower()
         if severity in {"high", "critical"}:
@@ -1269,10 +1453,10 @@ Telemetry Context:
             lines.append("Key observations:")
             for item in explainability:
                 lines.append(f"- {item}")
-        processed_logs = context.get("processed_logs") or []
+        processed_logs = context.get("key_events") or []
         if processed_logs:
             lines.append("Related processed logs were reviewed for context and supporting evidence.")
-        correlation_findings = context.get("correlation_findings") or []
+        correlation_findings = context.get("risk_signals") or []
         if correlation_findings:
             lines.append("Correlation signals were considered to determine potential multi-stage activity.")
         return "\n".join(lines[:10])
@@ -1590,40 +1774,6 @@ Telemetry Context:
         context = context or {}
         extracted = self._extract_investigation_inputs(alert, context)
         evidence = alert.get("evidence") or {}
-        mitre_list = alert.get("mitre") or []
-        mitre_techniques = []
-        if isinstance(mitre_list, list):
-            for item in mitre_list:
-                if isinstance(item, dict):
-                    tid = str(item.get("technique_id") or item.get("id") or "").strip()
-                    name = str(item.get("name") or item.get("technique_name") or "").strip()
-                    label = f"{tid} {name}".strip()
-                    if label:
-                        mitre_techniques.append(label)
-                else:
-                    value = str(item).strip()
-                    if value:
-                        mitre_techniques.append(value)
-        ioc_matches = alert.get("ioc_matches") or []
-        if not isinstance(ioc_matches, list):
-            ioc_matches = [ioc_matches]
-        processed_logs = context.get("processed_logs") or []
-        raw_snippets = []
-        if isinstance(processed_logs, list):
-            for log in processed_logs[:5]:
-                if not isinstance(log, dict):
-                    continue
-                raw_snippets.append(
-                    {
-                        "timestamp": log.get("timestamp"),
-                        "event_type": log.get("event_type"),
-                        "message": log.get("message"),
-                        "raw": log.get("raw")
-                    }
-                )
-        correlation_findings = context.get("correlation_findings") or []
-        if not isinstance(correlation_findings, list):
-            correlation_findings = [correlation_findings]
         input_fields = {
             "alert_id": alert.get("id") or alert.get("alert_id"),
             "rule_name": alert.get("rule_name"),
@@ -1631,62 +1781,26 @@ Telemetry Context:
             "severity": alert.get("severity"),
             "confidence": alert.get("confidence_score"),
             "summary": alert.get("summary"),
-            "mitre_techniques": mitre_techniques,
-            "ioc_matches": ioc_matches,
-            "processed_log_ids": evidence.get("processed_ids") or [],
-            "evidence_fingerprints": evidence.get("fingerprints") or [],
-            "raw_event_snippets": raw_snippets,
-            "correlation_findings": correlation_findings
+            "asset": context.get("asset") or {},
+            "key_events": context.get("key_events") or [],
+            "ioc_summary": context.get("ioc_summary") or {},
+            "mitre_summary": context.get("mitre_summary") or [],
+            "risk_signals": context.get("risk_signals") or []
         }
         return f"""
-You are a SOC incident investigator.
+You are a SOC security analysis engine.
+Return ONLY valid JSON.
+No markdown.
+No explanations.
+No extra text.
+Output must start with {{ and end with }}.
 
-STRICT RULES:
-- Use only the data provided.
-- Do not invent facts.
-- Keep response safe and professional.
-- Do not include offensive or explicit content.
-- Return ONLY valid JSON.
-- Do NOT invent new IOCs not present in extracted_iocs.
-- Domains must be valid DNS names with a dot and TLD-like suffix.
-- IPs must be valid IPv4 or IPv6.
-- SHA256 must be 64 hex, MD5 must be 32 hex.
-- Filenames ending with .exe/.dll/.sys/.bat/.ps1 are process/file, not domain.
-- Never treat fingerprints, event_ids, processed_ids, or alert_id as IOCs.
-- If is_incident=false then incident_severity="none".
-- If is_incident=true then incident_severity must be low|medium|high|critical.
-- Keep tone stable and consistent as SOC analyst case notes.
-- Summary must be at least 3 lines.
-- Case notes must be at least 8 lines.
-- Explainability must have at least 4 bullet items.
-- Recommended actions must have at least 3 items.
-- Timeline must have at least 3 steps.
-- If evidence is missing, state "insufficient evidence" and propose validation steps.
-
-Required JSON schema:
-{{
-  "summary": "3-6 lines SOC analyst summary with context and impact",
-  "case_notes": "Detailed paragraph style case notes (8-15 lines). Must include: what happened, why suspicious, what evidence supports it, what is missing, what to verify next.",
-  "explainability": ["Bullet 1 explaining key trigger with evidence", "Bullet 2 explaining mapping or IOC", "Bullet 3 explaining correlation/timeline", "Bullet 4 explaining uncertainty or missing context"],
-  "assessment": {
-    "is_incident": false,
-    "incident_severity": "low|medium|high|critical",
-    "confidence_score": 0,
-    "reasoning": "Short but clear reasoning why it is/is not an incident"
-  },
-  "recommended_actions": ["Action 1 (specific)", "Action 2 (specific)", "Action 3 (specific)"],
-  "ioc_analysis": {
-    "observed_iocs": ["..."],
-    "ioc_verdict": "malicious|suspicious|unknown|benign",
-    "ioc_notes": "Explain IOC meaning and what to do next"
-  },
-  "mitre_analysis": {
-    "techniques": ["Txxxx.xxx ..."],
-    "tactics": ["..."],
-    "mitre_notes": "Explain what this technique means in plain SOC language"
-  },
-  "timeline": ["Step 1: ...", "Step 2: ...", "Step 3: ..."]
-}}
+Return fields:
+- is_incident (bool)
+- confidence_score (0-100 int)
+- incident_severity (low|medium|high|critical|none)
+- summary (string)
+- case_notes (string)
 
 Input Fields:
 {json.dumps(input_fields, indent=2)}
@@ -1697,67 +1811,27 @@ Alert:
 Extracted Inputs:
 {json.dumps(extracted, indent=2)}
 
-Context:
+Structured Context:
 {json.dumps(context, indent=2)}
 """
 
     async def investigate_alert(self, alert: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self.build_investigation_prompt(alert, context)
-        raw_output = await self._ask_ollama(prompt)
-        cleaned = self._clean_llm_output(raw_output)
-        extracted = self._extract_json_from_text(cleaned)
-        try:
-            parsed = json.loads(extracted)
-            normalized = self._normalize_investigation(parsed, alert, context)
-        except Exception:
-            repair_prompt = f"""
-You are a SOC analyst. Fix the JSON to match the exact schema below and return ONLY valid JSON.
-
-Schema:
-{{
-  "summary": "3-6 lines SOC analyst summary with context and impact",
-  "case_notes": "Detailed paragraph style case notes (8-15 lines). Must include: what happened, why suspicious, what evidence supports it, what is missing, what to verify next.",
-  "explainability": ["Bullet 1 explaining key trigger with evidence", "Bullet 2 explaining mapping or IOC", "Bullet 3 explaining correlation/timeline", "Bullet 4 explaining uncertainty or missing context"],
-  "assessment": {{
-    "is_incident": false,
-    "incident_severity": "low|medium|high|critical",
-    "confidence_score": 0,
-    "reasoning": "Short but clear reasoning why it is/is not an incident"
-  }},
-  "recommended_actions": ["Action 1 (specific)", "Action 2 (specific)", "Action 3 (specific)"],
-  "ioc_analysis": {{
-    "observed_iocs": ["..."],
-    "ioc_verdict": "malicious|suspicious|unknown|benign",
-    "ioc_notes": "Explain IOC meaning and what to do next"
-  }},
-  "mitre_analysis": {{
-    "techniques": ["Txxxx.xxx ..."],
-    "tactics": ["..."],
-    "mitre_notes": "Explain what this technique means in plain SOC language"
-  }},
-  "timeline": ["Step 1: ...", "Step 2: ...", "Step 3: ..."]
-}}
-
-Broken Output:
-{cleaned}
-"""
-            try:
-                repaired_raw = await self._ask_ollama(repair_prompt)
-                repaired_clean = self._clean_llm_output(repaired_raw)
-                repaired_extracted = self._extract_json_from_text(repaired_clean)
-                parsed = json.loads(repaired_extracted)
-                normalized = self._normalize_investigation(parsed, alert, context)
-                cleaned = repaired_clean
-            except Exception:
-                error_message = "Invalid JSON output from LLM"
-                normalized = self._normalize_investigation({}, alert, context, error_message=error_message)
-                if cleaned:
-                    normalized["summary"] = cleaned[:400]
+        alert_id = alert.get("id") if isinstance(alert, dict) else None
+        self.logger.info(f"AI CALL START model={self.model}", extra={"alert_id": alert_id})
+        self.logger.info(f"PROMPT LENGTH={len(prompt)}", extra={"alert_id": alert_id})
+        overall_start = time.monotonic()
+        normalized, cleaned, raw_response, retry_count, last_retry_reason = await self._investigate_with_retry(prompt, alert, context)
+        overall_duration = time.monotonic() - overall_start
+        self.logger.info(f"AI CALL DURATION={overall_duration:.2f}s", extra={"alert_id": alert_id})
         return {
             "result": normalized,
             "raw_output": cleaned,
+            "raw_response": raw_response,
             "prompt": prompt,
-            "model": self.model
+            "model": self.model,
+            "retry_count": retry_count,
+            "last_retry_reason": last_retry_reason
         }
 
     async def investigation_smoke_test(self) -> List[Dict[str, Any]]:

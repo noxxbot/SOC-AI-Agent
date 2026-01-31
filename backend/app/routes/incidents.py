@@ -4,7 +4,9 @@ from sqlalchemy.orm import Session
 from typing import Any, Dict, List, Optional
 import json
 
+from app.core.config import settings
 from app.database.db import get_db
+from app.models.ai_investigation import AIInvestigation
 from app.models.detection_alert import DetectionAlert
 from app.models.incident import Incident
 from app.services.incident_engine import build_incident_context, decide_incident, create_or_link_incident
@@ -67,8 +69,29 @@ async def auto_create_incident(alert_id: int, db: Session = Depends(get_db)):
     if not alert:
         raise HTTPException(status_code=404, detail="Detection alert not found")
 
+    ai_row = (
+        db.query(AIInvestigation)
+        .filter(AIInvestigation.alert_id == alert.id)
+        .order_by(AIInvestigation.created_at.desc())
+        .first()
+    )
+    threshold = int(getattr(settings, "INCIDENT_AI_MIN_CONFIDENCE", 60) or 60)
+    if (
+        not ai_row
+        or ai_row.status != "completed"
+        or not ai_row.is_incident
+        or int(ai_row.confidence_score or 0) < threshold
+    ):
+        raise HTTPException(status_code=409, detail="AI investigation not confirmed for incident creation")
+
     context = build_incident_context(db, alert)
     decision = decide_incident(alert, context)
+    decision["should_create"] = True
+    decision["confidence_score"] = max(int(decision.get("confidence_score") or 0), int(ai_row.confidence_score or 0))
+    decision["source"] = "ai_investigation"
+    decision["reason"] = "AI investigation confirmed incident"
+    decision["summary"] = alert.summary or decision.get("summary") or "AI investigation confirmed incident"
+    decision["severity"] = ai_row.incident_severity or decision.get("severity") or "low"
     incident = create_or_link_incident(db, decision, alert)
     return {
         "decision": decision,
@@ -88,3 +111,11 @@ def recent_incidents(
         .all()
     )
     return [_map_incident(r) for r in rows]
+
+
+@router.get("/incidents/{incident_id}", response_model=IncidentRecord)
+def get_incident(incident_id: int, db: Session = Depends(get_db)):
+    row = db.query(Incident).filter(Incident.id == incident_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return _map_incident(row)

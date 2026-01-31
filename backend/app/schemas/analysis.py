@@ -17,6 +17,11 @@ class LogAnalysisResponse(BaseModel):
     explanation: str
     recommendations: List[str]
     threatVectors: ThreatVectors
+    severity: Optional[str] = None
+    should_alert: Optional[bool] = None
+    should_incident: Optional[bool] = None
+    analysis_source: Optional[str] = None
+    fail_closed: Optional[bool] = None
 
 class AlertAnalysisRequest(BaseModel):
     alert_id: int = Field(..., description="ID of the alert to analyze")

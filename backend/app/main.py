@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect, text
 from app.database.db import engine, Base
 from app.models.models import Agent, Alert
 from app.models.correlation_finding import CorrelationFinding
@@ -11,6 +12,7 @@ from app.routes import ai_investigations, incidents
 from app.core.config import settings
 from app.routes import threat_intel
 from app.services.correlation_scheduler import start_scheduler
+from app.services.ai_service import AIService
 
 
 app = FastAPI(
@@ -20,6 +22,27 @@ app = FastAPI(
 )
 
 Base.metadata.create_all(bind=engine)
+
+def _ensure_ai_investigation_columns() -> None:
+    inspector = inspect(engine)
+    if "ai_investigations" not in inspector.get_table_names():
+        return
+    existing = {col["name"] for col in inspector.get_columns("ai_investigations")}
+    additions = []
+    if "retry_count" not in existing:
+        additions.append("ALTER TABLE ai_investigations ADD COLUMN retry_count INTEGER DEFAULT 0")
+    if "last_retry_reason" not in existing:
+        additions.append("ALTER TABLE ai_investigations ADD COLUMN last_retry_reason TEXT")
+    if "failure_reason" not in existing:
+        additions.append("ALTER TABLE ai_investigations ADD COLUMN failure_reason TEXT")
+    if "raw_response" not in existing:
+        additions.append("ALTER TABLE ai_investigations ADD COLUMN raw_response TEXT")
+    if additions:
+        with engine.begin() as conn:
+            for stmt in additions:
+                conn.execute(text(stmt))
+
+_ensure_ai_investigation_columns()
 
 # CORS Configuration - Allow all origins for development
 app.add_middleware(
@@ -51,6 +74,12 @@ app.include_router(incidents.router, prefix="/api/v1", tags=["incidents"])
 @app.on_event("startup")
 def start_background_tasks():
     start_scheduler()
+
+
+@app.on_event("startup")
+async def verify_ollama_startup():
+    service = AIService()
+    await service.check_ollama_ready()
 
 
 if __name__ == "__main__":

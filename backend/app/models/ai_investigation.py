@@ -18,3 +18,7 @@ class AIInvestigation(Base):
     incident_severity = Column(String, default="low")
     status = Column(String, default="pending")
     error_message = Column(Text)
+    retry_count = Column(Integer, default=0)
+    last_retry_reason = Column(Text)
+    failure_reason = Column(Text)
+    raw_response = Column(Text)

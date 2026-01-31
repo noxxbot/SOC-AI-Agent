@@ -10,7 +10,6 @@ from app.database.db import get_db
 from app.models.detection_alert import DetectionAlert
 from app.models.ai_investigation import AIInvestigation
 from app.services.alert_automation import schedule_ai_investigation
-from app.services.incident_engine import run_incident_task
 from app.services.rule_engine import run_rule_engine
 
 router = APIRouter()
@@ -36,6 +35,7 @@ class DetectionAlertResponse(BaseModel):
     recommended_actions: List[str]
     fingerprint: str
     investigated: bool
+    incident_id: Optional[int]
 
 
 def _parse_json(value: Optional[str], fallback: Any) -> Any:
@@ -49,6 +49,11 @@ def _parse_json(value: Optional[str], fallback: Any) -> Any:
 
 def _map_alert(alert: DetectionAlert, investigated: bool = False) -> Dict[str, Any]:
     evidence = _parse_json(alert.evidence_json, {})
+    incident_id = evidence.get("incident_id")
+    if isinstance(incident_id, str) and incident_id.isdigit():
+        incident_id = int(incident_id)
+    if isinstance(incident_id, bool):
+        incident_id = None
     return {
         "id": alert.id,
         "created_at": alert.created_at.isoformat() if alert.created_at else None,
@@ -65,7 +70,8 @@ def _map_alert(alert: DetectionAlert, investigated: bool = False) -> Dict[str, A
         "ioc_matches": _parse_json(alert.ioc_json, []),
         "recommended_actions": _parse_json(alert.actions_json, []),
         "fingerprint": alert.fingerprint,
-        "investigated": investigated
+        "investigated": investigated,
+        "incident_id": incident_id
     }
 
 
@@ -126,8 +132,6 @@ def run_detections(background_tasks: BackgroundTasks, db: Session = Depends(get_
 
     for alert in created_alerts:
         schedule_ai_investigation(alert.id, db, background_tasks, False)
-        if settings.INCIDENT_AUTO_CREATE:
-            background_tasks.add_task(run_incident_task, alert.id)
 
     return {
         "status": "ok",

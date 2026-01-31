@@ -109,5 +109,9 @@ export const api = {
 
   async getRecentIncidents(limit: number = 20): Promise<Incident[]> {
     return fetchJson(`${BASE_URL}/incidents/recent?limit=${limit}`);
+  },
+
+  async getIncident(incident_id: number): Promise<Incident> {
+    return fetchJson(`${BASE_URL}/incidents/${incident_id}`);
   }
 };
