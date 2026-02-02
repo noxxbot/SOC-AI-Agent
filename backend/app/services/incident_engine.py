@@ -430,11 +430,12 @@ def create_or_link_incident(
             logger.exception("incident link failed", extra={"alert_id": alert.id, "fingerprint": fingerprint})
         return existing
 
+    confidence_value = int(alert.confidence_score or decision.get("confidence_score") or 0)
     incident = Incident(
         title=decision.get("title") or "Incident",
         summary=decision.get("summary") or "",
         severity=decision.get("severity") or "low",
-        confidence_score=int(decision.get("confidence_score") or 0),
+        confidence_score=confidence_value,
         incident_fingerprint=fingerprint,
         source=decision.get("source") or "rule_engine",
         agent_id=decision.get("agent_id"),

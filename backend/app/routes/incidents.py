@@ -22,6 +22,8 @@ class IncidentRecord(BaseModel):
     summary: Optional[str]
     severity: str
     confidence_score: int
+    confidence_breakdown: Dict[str, Any]
+    confidence_explanation: Optional[str]
     incident_fingerprint: str
     source: str
     agent_id: Optional[str]
@@ -42,7 +44,27 @@ def _parse_json(value: Optional[str], fallback: Any) -> Any:
         return fallback
 
 
-def _map_incident(row: Incident) -> Dict[str, Any]:
+def _confidence_from_alerts(db: Session, row: Incident) -> Dict[str, Any]:
+    related_alert_ids = _parse_json(row.related_alert_ids_json, [])
+    if not related_alert_ids:
+        return {"confidence_breakdown": {}, "confidence_explanation": ""}
+    alert = (
+        db.query(DetectionAlert)
+        .filter(DetectionAlert.id.in_(related_alert_ids))
+        .order_by(DetectionAlert.created_at.desc())
+        .first()
+    )
+    if not alert:
+        return {"confidence_breakdown": {}, "confidence_explanation": ""}
+    evidence = _parse_json(alert.evidence_json, {})
+    return {
+        "confidence_breakdown": evidence.get("confidence_breakdown") or {},
+        "confidence_explanation": evidence.get("confidence_explanation") or ""
+    }
+
+
+def _map_incident(row: Incident, db: Session) -> Dict[str, Any]:
+    confidence = _confidence_from_alerts(db, row)
     return {
         "id": row.id,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -51,6 +73,8 @@ def _map_incident(row: Incident) -> Dict[str, Any]:
         "summary": row.summary,
         "severity": row.severity,
         "confidence_score": row.confidence_score,
+        "confidence_breakdown": confidence.get("confidence_breakdown") or {},
+        "confidence_explanation": confidence.get("confidence_explanation") or "",
         "incident_fingerprint": row.incident_fingerprint,
         "source": row.source,
         "agent_id": row.agent_id,
@@ -95,7 +119,7 @@ async def auto_create_incident(alert_id: int, db: Session = Depends(get_db)):
     incident = create_or_link_incident(db, decision, alert)
     return {
         "decision": decision,
-        "incident": _map_incident(incident) if incident else None
+        "incident": _map_incident(incident, db) if incident else None
     }
 
 
@@ -110,7 +134,7 @@ def recent_incidents(
         .limit(limit)
         .all()
     )
-    return [_map_incident(r) for r in rows]
+    return [_map_incident(r, db) for r in rows]
 
 
 @router.get("/incidents/{incident_id}", response_model=IncidentRecord)
@@ -118,4 +142,4 @@ def get_incident(incident_id: int, db: Session = Depends(get_db)):
     row = db.query(Incident).filter(Incident.id == incident_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Incident not found")
-    return _map_incident(row)
+    return _map_incident(row, db)

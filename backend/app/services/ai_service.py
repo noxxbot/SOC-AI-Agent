@@ -1175,6 +1175,71 @@ Telemetry Context:
         mapped_ioc_intel: List[Dict[str, Any]] = []
         mitre_matches: List[Dict[str, Any]] = []
 
+        def _extract_technique_id(value: Any) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            if text.lower().startswith("mitre:"):
+                text = text.split(":", 1)[-1].strip()
+            match = re.search(r"(T\d{4}(?:\.\d{3})?)", text, re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
+            token = text.split()[0].strip()
+            return token.upper() if token else ""
+
+        def _normalize_mitre_items(items: Any, tags: Any = None) -> List[Dict[str, Any]]:
+            normalized: List[Dict[str, Any]] = []
+            candidates: List[Any] = []
+            if isinstance(items, list):
+                candidates.extend(items)
+            elif items:
+                candidates.append(items)
+            if isinstance(tags, list):
+                for tag in tags:
+                    tag_value = str(tag or "").strip()
+                    if tag_value.lower().startswith("mitre:"):
+                        candidates.append(tag_value.split(":", 1)[-1])
+            for item in candidates:
+                if isinstance(item, dict):
+                    tid = item.get("technique_id") or item.get("id") or item.get("technique")
+                    name = item.get("technique_name") or item.get("name")
+                    tactics = item.get("tactics") or item.get("tactic") or []
+                    if not isinstance(tactics, list):
+                        tactics = [tactics]
+                    tid = _extract_technique_id(tid or name)
+                    if not tid:
+                        continue
+                    score = item.get("confidence_score") or item.get("confidence") or 0
+                    try:
+                        score = int(score)
+                    except Exception:
+                        score = 0
+                    normalized.append(
+                        {
+                            "technique_id": tid,
+                            "technique_name": str(name or "").strip(),
+                            "tactics": [str(t).strip() for t in tactics if str(t).strip()],
+                            "confidence_score": int(max(0, min(100, score))),
+                            "reasoning": item.get("reasoning") or "",
+                            "matched_signals": item.get("matched_signals") or []
+                        }
+                    )
+                elif isinstance(item, str):
+                    tid = _extract_technique_id(item)
+                    if not tid:
+                        continue
+                    normalized.append(
+                        {
+                            "technique_id": tid,
+                            "technique_name": "",
+                            "tactics": [],
+                            "confidence_score": 0,
+                            "reasoning": "",
+                            "matched_signals": []
+                        }
+                    )
+            return normalized
+
         def _add_iocs(key: str, values: Any) -> None:
             if not values:
                 return
@@ -1209,9 +1274,8 @@ Telemetry Context:
                     _add_iocs("md5", value)
                 elif ioc_type == "cve":
                     _add_iocs("cves", value)
-            mitre = event.get("mitre_matches") or []
-            if isinstance(mitre, list):
-                mitre_matches.extend([m for m in mitre if isinstance(m, dict)])
+            event_tags = event.get("tags") or (event.get("fields") or {}).get("tags")
+            mitre_matches.extend(_normalize_mitre_items(event.get("mitre_matches") or [], event_tags))
 
         ioc_summary = context.get("ioc_summary") or {}
         for item in ioc_summary.get("high_confidence_iocs") or []:
@@ -1232,16 +1296,14 @@ Telemetry Context:
                         _add_iocs("cves", value)
 
         mitre_summary = context.get("mitre_summary") or []
-        if isinstance(mitre_summary, list):
-            mitre_matches.extend([m for m in mitre_summary if isinstance(m, dict)])
+        mitre_matches.extend(_normalize_mitre_items(mitre_summary))
 
         alert_ioc_matches = alert.get("ioc_matches") or alert.get("ioc_intel") or []
         if isinstance(alert_ioc_matches, list):
             mapped_ioc_intel.extend([m for m in alert_ioc_matches if isinstance(m, dict)])
 
         alert_mitre = alert.get("mitre") or []
-        if isinstance(alert_mitre, list):
-            mitre_matches.extend([m for m in alert_mitre if isinstance(m, dict)])
+        mitre_matches.extend(_normalize_mitre_items(alert_mitre))
 
         dedup_mitre = []
         seen = set()

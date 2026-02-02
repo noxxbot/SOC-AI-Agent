@@ -9,7 +9,11 @@ from app.core.config import settings
 from app.database.db import get_db
 from app.models.detection_alert import DetectionAlert
 from app.models.ai_investigation import AIInvestigation
-from app.services.alert_automation import schedule_ai_investigation
+from app.services.alert_automation import (
+    schedule_ai_investigation,
+    build_investigation_context,
+    compute_confidence_breakdown
+)
 from app.services.rule_engine import run_rule_engine
 
 router = APIRouter()
@@ -26,6 +30,8 @@ class DetectionAlertResponse(BaseModel):
     rule_name: str
     severity: str
     confidence_score: int
+    confidence_breakdown: Dict[str, Any]
+    confidence_explanation: Optional[str]
     category: str
     status: str
     summary: Optional[str]
@@ -49,6 +55,8 @@ def _parse_json(value: Optional[str], fallback: Any) -> Any:
 
 def _map_alert(alert: DetectionAlert, investigated: bool = False) -> Dict[str, Any]:
     evidence = _parse_json(alert.evidence_json, {})
+    confidence_breakdown = evidence.get("confidence_breakdown") or {}
+    confidence_explanation = evidence.get("confidence_explanation") or ""
     incident_id = evidence.get("incident_id")
     if isinstance(incident_id, str) and incident_id.isdigit():
         incident_id = int(incident_id)
@@ -62,6 +70,8 @@ def _map_alert(alert: DetectionAlert, investigated: bool = False) -> Dict[str, A
         "rule_name": alert.rule_name,
         "severity": alert.severity,
         "confidence_score": alert.confidence_score,
+        "confidence_breakdown": confidence_breakdown,
+        "confidence_explanation": confidence_explanation,
         "category": alert.category,
         "status": alert.status,
         "summary": alert.summary,
@@ -131,6 +141,20 @@ def run_detections(background_tasks: BackgroundTasks, db: Session = Depends(get_
                     skipped_duplicates += 1
 
     for alert in created_alerts:
+        context = build_investigation_context(db, alert)
+        confidence = compute_confidence_breakdown(alert, context, context.get("ai_investigation") or {})
+        evidence = _parse_json(alert.evidence_json, {})
+        evidence.update(
+            {
+                "confidence_breakdown": confidence.get("confidence_breakdown") or {},
+                "confidence_explanation": confidence.get("confidence_explanation") or "",
+                "confidence_floor_applied": bool(confidence.get("confidence_floor_applied"))
+            }
+        )
+        alert.evidence_json = json.dumps(evidence)
+        alert.confidence_score = int(confidence.get("confidence_score") or 0)
+        db.add(alert)
+        db.commit()
         schedule_ai_investigation(alert.id, db, background_tasks, False)
 
     return {

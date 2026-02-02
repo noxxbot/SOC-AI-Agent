@@ -1,114 +1,217 @@
-AUDIT 3.0 REPORT
-=====================================================
-DATE: 2026-01-30
-SYSTEM: Sentinel AI SOC Operations Copilot
-AUDITOR: AI Pair Programmer
-STATUS: COMPLETED
-=====================================================
+# SOC Platform Audit (Audit 4.0)
 
-1. EXECUTIVE SUMMARY
------------------------------------------------------
-The Sentinel AI system demonstrates a high degree of alignment with the specified "Ideal Workflow". The architecture strictly enforces a "Fail-Closed" security model where AI acts as the final gatekeeper for incident creation. The automated pipeline successfully transitions data from raw ingestion to sophisticated multi-stage correlation without manual intervention.
+## 1. Executive Summary
 
-Recent remediations have addressed critical gating logic flaws, ensuring that AI failures (timeouts, malformed JSON) correctly result in NO incident creation. The system is now considered production-ready, with robust error handling and high-fidelity "SOC-style" prompts.
+This audit traces a critical log with MITRE T1003.001 through the backend pipeline and identifies the exact points where severity and MITRE context are reduced or ignored, preventing detection and incident creation.
 
-2. WORKFLOW VALIDATION RESULTS
------------------------------------------------------
-A) DATA FLOW AUDIT: [PASS]
-   - Logs are ingested and passed through `normalization_engine` and `enrichment_engine`.
-   - `run_detection_pipeline_task` executes `rule_engine` automatically.
-   - Created alerts trigger `run_ai_investigation_and_maybe_create_incident_task` via background tasks.
-   - Incidents are linked ONLY if AI returns `is_incident=True` and `status=completed`.
+**Numbered Findings**
+1. **Rule severity overrides log severity.** Detection alerts inherit the rule’s static severity (`BaseRule.severity` or `_build_signal_alert`), not `severity_raw` from the log.  
+2. **MITRE T1003.001 is not produced by the mapper.** The MITRE mapper emits a fixed set of techniques and does not include T1003.001, so this technique does not enter rule evaluation or incident logic.  
+3. **Incident creation is gated by AI in the async incident task.** The incident task exits early unless AI completed, marked `is_incident=True`, and met the confidence threshold.  
 
-B) AUTOMATION INTEGRITY: [PASS]
-   - Async execution is handled via `FastAPI.BackgroundTasks`.
-   - `schedule_ai_investigation` ensures AI runs immediately upon alert creation.
-   - No evidence of "swallowed" exceptions in the critical path (after recent patches).
+## 2. Log Lifecycle Analysis (10 Stages)
 
-C) FAIL-CLOSED LOGIC: [PASS]
-   - Validated `incident_engine.py`: `run_incident_task` explicitly checks `ai_row.status == "completed"` and `ai_row.is_incident`.
-   - Validated `ai_service.py`: `_safe_default_analysis` returns `is_incident=False` and `confidence_score=0`.
-   - Outcome: AI failure -> Alert stays Open -> No Incident created.
+**Scenario Inputs (from requirement)**
+- `severity_raw = "critical"`
+- MITRE = `T1003.001` (Credential Dumping)
+- Example behavior: `rundll32.exe` dumping LSASS
 
-D) AI QUALITY: [PASS]
-   - Prompt construction in `build_investigation_prompt` is excellent.
-   - Includes: Persona, Strict JSON Schema, Few-Shot Examples (Good/Bad), and detailed Context (IOCs, MITRE, Logs).
-   - "Explainability" and "Case Notes" requirements enforce SOC-realistic output.
+### Stage 1: POST /api/v1/logs/ingest
+**File + Function**
+- `backend/app/routes/logs.py` → `ingest_logs`, `_extract_logs`, `_normalize_incoming_log`
 
-E) SEVERITY & CONFIDENCE LOGIC: [PASS]
-   - Severity is normalized via `_normalize_severity`.
-   - AI confidence score updates the alert and drives the incident decision.
-   - Logic `decision["confidence_score"] = max(..., int(ai_row.confidence_score))` ensures AI opinion is weighted heavily.
+**Numbered Findings**
+1. **Fields Read:** `agent_id`, `hostname`, `log_source`, `event_type`, `timestamp`, `severity_raw`, `severity`, `raw`, `message`, `fields` (`_normalize_incoming_log`).  
+2. **Fields Written:** `EndpointLog.severity_raw` is stored directly from `severity_raw` or `severity` (if `severity_raw` is missing).  
+3. **Fields Dropped/Ignored:** Reserved keys are not copied into `fields_payload`; all non-reserved keys are moved into `fields` (`_normalize_incoming_log`).  
+4. **Severity Change:** None at this stage; `severity_raw` is preserved as provided.  
+5. **MITRE Ignored:** No MITRE logic exists in ingestion.  
+6. **Detection Not Created:** Detection pipeline is only scheduled after processing completes; this stage does not create detections.  
+7. **Incident Not Created:** Incidents are not evaluated here.
 
-F) CORRELATION INTELLIGENCE: [PASS]
-   - `correlation_engine.py` implements true multi-stage logic (e.g., "Brute Force -> Success", "PowerShell -> Network").
-   - Uses `_correlation_score` to boost confidence for complex attack patterns.
-   - Fingerprinting ensures accurate grouping of related events.
+### Stage 2: Log Validation & Schema Enforcement
+**File + Function**
+- `backend/app/routes/logs.py` → `LogIngestRequest`, `LogRecord`, `_validate_required_log`
 
-G) DATABASE CONSISTENCY: [PASS]
-   - `db.commit()` usage is consistent.
-   - `create_or_link_incident` uses time-windowed fingerprinting to prevent duplicate incidents.
+**Numbered Findings**
+1. **Fields Read:** `agent_id`, `log_source`, `event_type`, `hostname`, `timestamp` (`_validate_required_log`).  
+2. **Fields Written:** None (validation only).  
+3. **Fields Dropped/Ignored:** None; invalid logs are rejected before insert.  
+4. **Severity Change:** None.  
+5. **MITRE Ignored:** None in validation.  
+6. **Detection Not Created:** Invalid logs are rejected; no downstream processing occurs.  
+7. **Incident Not Created:** Not applicable at this stage.
 
-H) FRONTEND-BACKEND SYNC: [PASS]
-   - Frontend correctly displays AI status ("AI failed – manual review needed").
-   - Incident page reflects only AI-confirmed incidents.
+### Stage 3: Log Normalization / Enrichment
+**File + Function**
+- `backend/app/services/log_processing/normalization_engine.py` → `normalize_log`, `_severity_score`  
+- `backend/app/services/log_processing/enrichment_engine.py` → `enrich_log`  
+- `backend/app/services/mitre_mapper.py` → `map_mitre_matches`
 
-I) SILENT FAILURE DETECTION: [FIXED]
-   - Identified a risk in `rule_engine.py` where a single rule failure could crash the detection loop.
-   - PATCH APPLIED: Wrapped rule evaluation in `try/except` to ensure pipeline resilience.
+**Numbered Findings**
+1. **Fields Read:** `severity_raw`, `event_type`, `fields`, `raw`, `message` for normalization and scoring.  
+2. **Fields Written:** `severity_score`, `category`, normalized `log_source`, normalized `event_type`, enriched `mitre_matches`, `tags`, `ioc_intel`, `fingerprint`.  
+3. **Fields Dropped/Ignored:** None explicitly dropped; normalization rewrites `log_source`, `event_type`, and lowercases `severity_raw`.  
+4. **Severity Change:** `severity_score` is computed from `severity_raw` and may be boosted by MITRE/IOC signals.  
+5. **MITRE Ignored:** `map_mitre_matches` only emits a fixed list of techniques (`T1059.001`, `T1218.011`, `T1112`, `T1071.004`, `T1027`); `T1003.001` is not emitted.  
+6. **Detection Not Created:** Enrichment does not create detections.  
+7. **Incident Not Created:** Not applicable here.
 
-J) SOC REALISM SCORE: 9/10
-   - The system mimics a Tier-2 analyst effectively.
-   - The separation of "Detection" (Rule) and "Incident" (AI Confirmed) is a best-practice pattern.
+### Stage 4: Persistence to processed_logs
+**File + Function**
+- `backend/app/routes/logs.py` → `ingest_logs`
+- `backend/app/models/models.py` → `ProcessedLog`
 
-3. CRITICAL FAILURES
------------------------------------------------------
-[NONE] 
-- Previous critical flaw regarding "Fail-Open" on AI failure has been remediated and verified.
+**Numbered Findings**
+1. **Fields Written:** `ProcessedLog.severity_score`, `fields_json` (includes `mitre_matches` and `ioc_intel`), `tags_json`, `fingerprint`.  
+2. **Fields Dropped/Ignored:** `severity_raw` is not a column on `ProcessedLog`; it is not persisted as a top-level field.  
+3. **Severity Change:** Only `severity_score` persists; `severity_raw` is no longer directly accessible in the processed log table.  
+4. **MITRE Ignored:** Only `mitre_matches` saved; if the mapper did not emit `T1003.001`, it is absent here.  
+5. **Detection Not Created:** Persistence only writes records and schedules detection pipeline.  
+6. **Incident Not Created:** Not applicable here.
 
-4. HIGH-RISK ISSUES
------------------------------------------------------
-[NONE]
-- All high-risk paths (incident creation, severity mapping) are secured.
+### Stage 5: Log Analysis UI Source
+**File + Function**
+- Frontend: `components/LogAnalyzer.tsx` → `fetchLogs`, `severityLabel`  
+- Frontend API: `services/api.ts` → `getProcessedLogs`  
+- Backend: `backend/app/routes/logs.py` → `get_recent_processed_logs`
 
-5. MEDIUM ISSUES
------------------------------------------------------
-1. **Manual Analysis Fallback:** 
-   - `_safe_default_log_analysis` returns `threatDetected=True` with `riskScore=60`. 
-   - Impact: If this function is ever wired into the automatic pipeline (currently it appears limited to manual/API usage), it could violate Fail-Closed.
-   - Recommendation: Ensure this function is strictly isolated from the automated incident path.
+**Numbered Findings**
+1. **Fields Read:** UI uses `severity_score`, `category`, `event_type`, `message`, `tags_json`, `iocs_json`.  
+2. **Fields Written:** None (read-only view).  
+3. **Fields Dropped/Ignored:** `severity_raw` is not present in the UI response; the UI derives severity from `severity_score`.  
+4. **Severity Change:** UI labels severity based on `severity_score` thresholds; this can show “critical” even when alerts remain low/medium.  
+5. **MITRE Ignored:** UI shows tags/fields but does not drive detections.  
+6. **Detection Not Created:** UI is read-only.  
+7. **Incident Not Created:** UI is read-only.
 
-2. **Rule Engine Isolation:**
-   - (Fixed during audit) The rule engine loop was vulnerable to single-rule crashes.
+### Stage 6: Rule Engine Evaluation
+**File + Function**
+- `backend/app/services/rule_engine.py` → `run_rule_engine`, `_load_processed_logs`, `_build_signal_alert`  
+- `backend/app/services/rules/base_rule.py` → `_build_alert`  
+- `backend/app/services/rules/rule_mitre_high_confidence.py` → `evaluate`
 
-6. AI QUALITY FINDINGS
------------------------------------------------------
-- **Prompt Engineering:** Top-tier. The inclusion of "BAD" examples in few-shot learning is a smart move to prevent common LLM pitfalls.
-- **Context:** `_extract_investigation_inputs` ensures the LLM has all necessary IOCs and MITRE tags.
-- **Safety:** `_clean_llm_output` and `_extract_json_from_text` provide robust parsing resilience.
+**Numbered Findings**
+1. **Fields Read:** `ProcessedLog.severity_score`, `fields_json.mitre_matches`, `fields_json.ioc_intel`, `tags_json`, `raw`, `message`.  
+2. **Fields Written:** In-memory alert payloads with `severity` set by rule definition or `_build_signal_alert`.  
+3. **Fields Dropped/Ignored:** `severity_raw` is not loaded from `ProcessedLog` (no column exists).  
+4. **Severity Change:** Alerts inherit `BaseRule.severity` or `_build_signal_alert` `"low"` regardless of `severity_score`.  
+5. **MITRE Ignored:**  
+   - `MitreHighConfidenceRule` only checks `T1059.001` and `T1027`.  
+   - If `T1003.001` is not in `mitre_matches`, no MITRE rule fires.  
+6. **Detection Not Created:** No rule match and no signal reasons (`MITRE match`, `Encoded command`, `IOC signal`, `Correlation hit`) means no alert.  
+7. **Incident Not Created:** Incidents are not evaluated here.
 
-7. AUTOMATION RELIABILITY FINDINGS
------------------------------------------------------
-- Background task scheduling is correctly implemented.
-- Database locking/race conditions are minimized by atomic commits and dedicated fingerprinting.
+### Stage 7: Detection Creation Logic
+**File + Function**
+- `backend/app/services/alert_automation.py` → `run_detection_pipeline_task`, `create_or_update_alert_from_analysis`  
+- `backend/app/routes/detections.py` → `run_detections`
 
-8. SOC REALISM RATING
------------------------------------------------------
-**Score: 9/10**
-- **Trust Factor:** High. The system admits when it doesn't know (Fail-Closed).
-- **Workflow:** Matches real-world SOC Triage -> Investigation -> Escalation flow.
-- **Logic:** Correlation rules are based on attack behaviors, not just signature matches.
+**Numbered Findings**
+1. **Fields Read:** Rule engine alert payloads; `fingerprint`, `severity`, `evidence`, `mitre`, `ioc_matches`.  
+2. **Fields Written:** `DetectionAlert.severity`, `evidence_json`, `mitre_json`, `ioc_json`, `actions_json`.  
+3. **Fields Dropped/Ignored:** Any log-level `severity_raw` is not available in this layer.  
+4. **Severity Change:** Alert severity is set to the rule’s `severity` or a default `"medium"` if missing.  
+5. **MITRE Ignored:** Only MITRE from rule payload is stored; if rule payload lacks T1003.001, it is absent.  
+6. **Detection Not Created:** Alerts are skipped if `fingerprint` is missing or already exists (duplicate).  
+7. **Incident Not Created:** Incident creation happens after AI investigation, not here.
 
-9. TOP FIX RECOMMENDATIONS
------------------------------------------------------
-1. **Monitor `_safe_default_log_analysis`:** Verify no future code paths use this for automation.
-2. **Add "Retry" for AI:** Currently, `failed` status is final. A "Retry" button on the frontend would be helpful for transient errors (Ollama timeouts).
-3. **Expand Correlation Rules:** Add more multi-stage patterns (e.g., "Phishing -> Process Execution").
-4. **Tune Dedup Window:** The hardcoded window in `create_or_link_incident` might need to be configurable per-rule.
+### Stage 8: Alert Severity Assignment
+**File + Function**
+- `backend/app/services/rules/base_rule.py` → `_build_alert`  
+- `backend/app/services/rule_engine.py` → `_build_signal_alert`
 
-10. FINAL VERDICT
------------------------------------------------------
-- Does system match ideal workflow? **YES**
-- Is it production-ready? **YES**
+**Numbered Findings**
+1. **Severity Source:** `BaseRule.severity` for rule-based alerts; `"low"` for signal alerts.  
+2. **Severity Change:** This is the definitive alert severity used later by incident logic.  
+3. **MITRE Ignored:** Severity does not reference MITRE or `severity_score`.  
+4. **Detection Not Created:** Not applicable (severity assignment does not create alerts).  
+5. **Incident Not Created:** Not applicable here.
 
-The system is architecturally sound, secure by design (Fail-Closed), and provides high-value automation for SOC operations.
+### Stage 9: AI Investigation Trigger
+**File + Function**
+- `backend/app/services/alert_automation.py` → `run_ai_investigation_and_maybe_create_incident`, `schedule_ai_investigation`, `_should_auto_investigate`
+
+**Numbered Findings**
+1. **Trigger Condition:**  
+   - Auto-investigation requires `AI_INVESTIGATE_ON_CREATE = true` and `AI_INVESTIGATE_MODE != "manual"`.  
+   - Existing investigations or `ai_status = "completed"` prevent re-run unless forced.  
+2. **Fields Read:** `DetectionAlert.evidence_json`, related logs via `_build_context`.  
+3. **Fields Written:** `AIInvestigation` row; `evidence_json.ai_status` updates on the alert.  
+4. **Severity Change:** AI sets `incident_severity` but only influences incident creation if AI gating passes.  
+5. **MITRE Ignored:** AI uses the built context; missing T1003.001 in `mitre_matches` means it is not in the context.  
+6. **Detection Not Created:** Not applicable.  
+7. **Incident Not Created:** If AI does not complete, `run_incident_task` will not proceed.
+
+### Stage 10: Incident Promotion Logic
+**File + Function**
+- `backend/app/services/incident_engine.py` → `run_incident_task`, `decide_incident`
+
+**Numbered Findings**
+1. **Gating Condition:** `run_incident_task` exits unless AI is completed, `is_incident=True`, and `confidence_score >= INCIDENT_AI_MIN_CONFIDENCE`.  
+2. **Fields Read:** `DetectionAlert.severity`, `ProcessedLog.severity_score`, MITRE matches, IOC intel, correlation findings.  
+3. **Fields Written:** Incident is created only after AI gating passes and `decide_incident` returns a valid fingerprint.  
+4. **Severity Change:** `decide_incident` can elevate to `"high"` for MITRE/IOC/correlation triggers, but uses alert severity as the base.  
+5. **MITRE Ignored:** MITRE triggers require tactics in `high_signal_tactics` and confidence >= 70; if `mitre_matches` lacks T1003.001 or tactics, the MITRE trigger does not fire.  
+6. **Detection Not Created:** Not applicable.  
+7. **Incident Not Created:** Any alert with AI gating failure exits before `decide_incident` can create an incident.
+
+## 3. Answers to Critical Questions
+
+1. **Is rule severity derived from log severity or rule definition?**  
+   Rule definition. `BaseRule._build_alert` sets `severity = self.severity`, and `_build_signal_alert` sets `"low"` regardless of log inputs.  
+
+2. **Can a CRITICAL log bypass LOW severity rules?**  
+   No. Alert severity is fixed by the rule or signal logic, and later incident logic uses that alert severity.  
+
+3. **Does rule-engine ignore severity_raw?**  
+   Yes. `ProcessedLog` does not store `severity_raw`, and rule evaluation loads only `severity_score`.  
+
+4. **What exact condition creates an alert?**  
+   A rule’s `evaluate` method returns an alert payload, or the signal logic emits a signal alert when there is at least one reason (`MITRE match`, `Encoded command`, `IOC signal`, or `Correlation hit`).  
+
+5. **What exact condition prevents alert creation?**  
+   No rule match and no signal reasons, or a duplicate/missing fingerprint causes the alert to be skipped.  
+
+6. **What exact condition creates an incident?**  
+   `run_incident_task` requires AI completed, `is_incident=True`, and confidence >= threshold. Only then does it call `decide_incident` and create an incident.  
+
+7. **Where does AI decision stop mattering?**  
+   The AI decision is required before `run_incident_task` proceeds; without AI approval, incident creation does not occur.  
+
+8. **Are MITRE techniques treated differently from tactics?**  
+   Yes. MITRE rules match specific technique IDs, while incident promotion requires matching tactics from MITRE details.  
+
+9. **Are credential access attacks explicitly supported?**  
+   Not for T1003.001. The MITRE mapper and `MitreHighConfidenceRule` do not include T1003.001.  
+
+10. **Are any silent defaults causing downgrade?**  
+    Yes. `_build_signal_alert` defaults to `"low"`, and rule classes set fixed severities (e.g., `MitreHighConfidenceRule.severity = "medium"`).
+
+## 4. Root Causes Summary
+
+### Design Issues
+- Static rule severity dominates alert severity and is not derived from `severity_raw`.
+- Incident creation is gated by AI completion and `is_incident=True`, even when deterministic signals exist.
+
+### Implementation Bugs
+- `map_mitre_matches` never emits `T1003.001`, so credential dumping is absent from `mitre_matches`.
+- `MitreHighConfidenceRule` only checks `T1059.001` and `T1027`, excluding `T1003.001`.
+
+## 5. Fix Plan (No Code Yet)
+
+### Phase 1: Ensure critical logs always generate a detection
+1. Add a deterministic "critical severity" rule in the rule engine path that emits a detection when `severity_score` is in the critical range.  
+2. Ensure the rule emits a stable fingerprint to avoid deduplication suppression.  
+
+### Phase 2: Align rules with real log schema
+1. Persist `severity_raw` into `ProcessedLog` or include it in the rule evaluation context from `fields_json`.  
+2. Align rule `event_type` and `category` checks with normalized values in `ProcessedLog`.  
+
+### Phase 3: Make detection creation deterministic
+1. Standardize fingerprint composition so each processed log yields a predictable alert candidate.  
+2. Ensure rules always include `mitre_matches` and `ioc_intel` when present in the log context.  
+
+### Phase 4: Add debug logging for dropped detections
+1. Add structured logging for every skipped alert with a reason (`no rule match`, `no signal reasons`, `missing fingerprint`, `duplicate fingerprint`).  
+2. Include log identifiers (`processed_log_id`, `fingerprint`, `severity_score`) in skip logs.

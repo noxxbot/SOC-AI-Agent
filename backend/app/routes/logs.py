@@ -431,6 +431,7 @@ async def ingest_logs(payload: LogIngestRequest, background_tasks: BackgroundTas
             fields_payload = {}
         fields_payload["mitre_matches"] = log.get("mitre_matches") or []
         fields_payload["ioc_intel"] = log.get("ioc_intel") or {}
+        fields_payload["severity_raw"] = log.get("severity_raw")
         fields_json = json.dumps(fields_payload)
         iocs_json = json.dumps(log.get("iocs") or {})
         tags_json = json.dumps(log.get("tags") or [])

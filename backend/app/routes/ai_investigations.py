@@ -43,6 +43,8 @@ class InvestigationRecord(BaseModel):
     status: str
     error_message: Optional[str]
     failure_reason: Optional[str] = None
+    confidence_breakdown: Dict[str, Any]
+    confidence_explanation: Optional[str]
     retry_count: Optional[int]
     last_retry_reason: Optional[str]
     raw_response: Optional[str] = ""
@@ -107,7 +109,8 @@ def _default_investigation_payload() -> Dict[str, Any]:
         "confidence_score": 0,
         "is_incident": False,
         "incident_severity": "none",
-        "confidence_breakdown": {}
+        "confidence_breakdown": {},
+        "confidence_explanation": ""
     }
 
 
@@ -147,6 +150,8 @@ def _map_investigation(row_data: Dict[str, Any]) -> Dict[str, Any]:
     confidence_score = output_json.get("confidence_score", row_data.get("confidence_score", 0))
     is_incident = output_json.get("is_incident", row_data.get("is_incident", False))
     incident_severity = output_json.get("incident_severity", row_data.get("incident_severity", "none"))
+    confidence_breakdown = output_json.get("confidence_breakdown") or {}
+    confidence_explanation = output_json.get("confidence_explanation") or ""
     payload = {
         "id": row_data.get("id"),
         "created_at": row_data.get("created_at"),
@@ -161,6 +166,8 @@ def _map_investigation(row_data: Dict[str, Any]) -> Dict[str, Any]:
         "status": row_data.get("status"),
         "error_message": row_data.get("error_message"),
         "failure_reason": row_data.get("failure_reason"),
+        "confidence_breakdown": confidence_breakdown,
+        "confidence_explanation": confidence_explanation,
         "retry_count": row_data.get("retry_count"),
         "last_retry_reason": row_data.get("last_retry_reason"),
         "raw_response": row_data.get("raw_response"),

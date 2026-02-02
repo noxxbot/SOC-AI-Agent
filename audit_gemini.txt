@@ -1,0 +1,105 @@
+# AUDIT 5.0 – End-to-End Detection Pipeline Integrity Audit
+# TARGET: Backend Pipeline (Rule Engine & Detection Logic)
+# DATE: 2026-02-01
+# STATUS: COMPLETED
+
+1. Executive Summary
+- The pipeline successfully ingests and processes logs, storing them with correct metadata (MITRE, IOCs, Severity).
+- A CRITICAL BREAKPOINT exists in the Rule Engine's log loading mechanism.
+- The Rule Engine is invoked correctly by the Ingest Service, but it IGNORES the specific log IDs passed to it.
+- Instead, the Rule Engine queries the database for "recent logs" using a strict time window (default 10 minutes).
+- Any log with a timestamp older than 10 minutes is silently excluded from detection, even if it was just ingested.
+- This explains why "historic" or "test" logs appear in Log Analysis (DB view) but never trigger detections.
+- Additionally, the "Critical Fallback" and "MITRE" detection loops operate outside the main error handling block, creating a risk of total engine failure if a single log is malformed.
+
+2. Pipeline Diagram
+Step 1: Ingest
+  - Func: `ingest_logs` (backend/app/routes/logs.py)
+  - Input: JSON Log Batch
+  - Action: Normalizes, validates, and saves to `endpoint_logs` and `processed_logs`.
+  - Handoff: Calls `background_tasks.add_task(_run_post_ingest_pipeline, processed_ids)`
+
+Step 2: Automation Trigger
+  - Func: `_run_post_ingest_pipeline` -> `run_detection_pipeline_task` (backend/app/services/alert_automation.py)
+  - Input: List of `processed_ids` (e.g., [101, 102])
+  - Action: Calls `run_rule_engine()` (No arguments passed!)
+
+Step 3: Rule Engine Execution
+  - Func: `run_rule_engine` (backend/app/services/rule_engine.py)
+  - Input: None (Ignores upstream IDs)
+  - Action: Calls `_load_processed_logs`
+  - Logic: SELECT * FROM processed_logs WHERE timestamp > (NOW - 10 mins)
+  - Result: Loads only FRESH logs. Old logs are dropped immediately.
+
+Step 4: Detection Logic
+  - Func: `run_rule_engine` loop
+  - Action: Evaluates Rules, then evaluates Fallback/MITRE/IOC paths.
+  - Output: List of Alert dictionaries.
+
+Step 5: Alert Persistence
+  - Func: `run_detection_pipeline_task` (backend/app/services/alert_automation.py)
+  - Action: Iterates alerts, checks `fingerprint` for deduplication.
+  - Result: Saves `DetectionAlert` to DB.
+
+Step 6: Incident Promotion
+  - Func: `run_ai_investigation_and_maybe_create_incident_task`
+  - Condition: Triggered only if Alert is created/updated.
+
+3. Confirmed Breakpoints
+1.  **Argument Decoupling in Alert Automation**: 
+    - `run_detection_pipeline_task` receives `processed_ids` from the ingest pipeline.
+    - However, it calls `run_rule_engine()` without arguments.
+    - `run_rule_engine` has no signature to accept `processed_ids`.
+    - Result: The specific logs that triggered the pipeline are not guaranteed to be analyzed.
+
+2.  **Strict Time Window Filtering**:
+    - `backend/app/services/rule_engine.py:127`
+    - `if ts and ts < cutoff: continue`
+    - Any log with `timestamp` older than `RULE_WINDOW_SECONDS` (600s) is discarded before rules or fallbacks can see it.
+    - This is the primary reason why test data (often old) fails to generate detections.
+
+4. Unreachable Logic
+- **File**: `backend/app/services/rule_engine.py`
+- **Line**: 652-771 (Fallback/MITRE Loop)
+- **Condition**: If `_load_processed_logs` returns empty (due to time window), this entire block is unreachable.
+- **Impact**: `RULE-CRITICAL-FALLBACK`, `RULE-MITRE-HIGH-RISK`, and `RULE-IOC-HIT` never execute for older logs.
+
+5. Schema Mismatches
+| Field | Produced by (Ingest/Processor) | Consumed by (Rule Engine) | Status |
+| :--- | :--- | :--- | :--- |
+| mitre_matches | `EnrichedLog` (List[Dict]) -> JSON String in `fields_json` | `json.loads(fields_json).get("mitre_matches")` | MATCH |
+| severity_score | `log_processor` (Int) | `log.severity_score` (Int) | MATCH |
+| ioc_intel | `EnrichedLog` (Dict) -> JSON String in `fields_json` | `json.loads(fields_json).get("ioc_intel")` | MATCH |
+| processed_id | `ProcessedLog.id` (Int) | `event.get("id")` (Int) | MATCH |
+
+6. Silent Failure Paths
+1.  **Time Window Drop**: Logs older than 10 minutes are silently skipped in `_load_processed_logs` without debug logging.
+2.  **Unprotected Fallback Loop**: The loop processing MITRE/IOC/Fallback (lines 652-771 in `rule_engine.py`) is outside the main `try/except` block (lines 640-642). If a malformed log causes an exception here (e.g., `_mitre_high_risk_matches` failure), the entire engine crashes, and `alert_automation.py` logs a generic "pipeline automation failed".
+
+7. Why Critical + MITRE Logs Do NOT Become Detections
+The system is designed to only monitor "live" traffic. When you ingest logs for testing, if they preserve their original timestamps (which they should), they are likely older than the 10-minute window.
+1. Log is Ingested -> `ProcessedLog` created (Success).
+2. Pipeline Triggered -> `run_rule_engine` called.
+3. Rule Engine Query -> Fetches recent logs.
+4. Filter Applied -> `if timestamp < (now - 10m): continue`.
+5. Log Dropped -> No rules checked, no fallback checked.
+6. Result -> No Alert.
+
+8. Verification Evidence
+- **Code Reference**: `backend/app/services/rule_engine.py` Line 123-127:
+  ```python
+  cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+  ...
+  if ts and ts < cutoff:
+      continue
+  ```
+- **Code Reference**: `backend/app/services/alert_automation.py` Line 251:
+  ```python
+  result = run_rule_engine()  # No IDs passed
+  ```
+
+9. Fix Strategy
+1.  **Modify `run_rule_engine` Signature**: Accept optional `processed_ids` list.
+2.  **Bypass Window for Explicit IDs**: If `processed_ids` are provided, fetch those specific logs regardless of timestamp.
+3.  **Wrap Fallback Logic**: Move the MITRE/IOC/Fallback loop inside a `try/except` block to prevent total engine crash.
+4.  **Logging**: Add a debug log when a log is skipped due to the time window.

@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -213,6 +214,8 @@ def create_or_update_alert_from_analysis(
         db.add(existing)
         db.commit()
         db.refresh(existing)
+        context = _build_context(db, existing)
+        _apply_confidence(db, existing, context, context.get("ai_investigation") or {})
         return existing
 
     record = DetectionAlert(
@@ -232,6 +235,8 @@ def create_or_update_alert_from_analysis(
     db.add(record)
     db.commit()
     db.refresh(record)
+    context = _build_context(db, record)
+    _apply_confidence(db, record, context, context.get("ai_investigation") or {})
     return record
 
 
@@ -243,10 +248,27 @@ def run_detection_pipeline_task(processed_ids: Optional[List[int]] = None) -> Di
         if processed_ids:
             mark_logs_analyzed(db, processed_ids)
 
-        result = run_rule_engine()
+        result = run_rule_engine(processed_ids)
         alerts = result.get("alerts", [])
 
+        # --- PHASE B: INVARIANT CHECKS ---
+        # Ensure 1 log <= 1 detection per rule
+        seen_log_usage = set()
+        
         for alert_payload in alerts:
+            # Check invariants
+            rule_name = alert_payload.get("rule_name")
+            pids = (alert_payload.get("evidence") or {}).get("processed_ids") or []
+            for pid in pids:
+                key = (rule_name, pid)
+                if key in seen_log_usage:
+                    logger.error(
+                        "invariant violation: log reused in multiple alerts for same rule", 
+                        extra={"rule": rule_name, "processed_id": pid}
+                    )
+                seen_log_usage.add(key)
+            # ---------------------------------
+
             fingerprint = alert_payload.get("fingerprint")
             if not fingerprint:
                 continue
@@ -366,23 +388,71 @@ def _build_context(db: Session, alert: DetectionAlert) -> Dict[str, Any]:
         except Exception:
             return 0
 
-    def _filter_mitre(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        filtered: List[Dict[str, Any]] = []
-        for match in matches or []:
-            if not isinstance(match, dict):
-                continue
-            score = _normalize_confidence(match.get("confidence_score") or match.get("confidence") or 0)
-            if score < 60:
-                continue
-            filtered.append(
-                {
-                    "technique_id": match.get("technique_id") or match.get("id"),
-                    "technique_name": match.get("technique_name") or match.get("name"),
-                    "tactics": match.get("tactics") or [],
-                    "confidence_score": score
-                }
-            )
-        return filtered
+    def _extract_technique_id(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.lower().startswith("mitre:"):
+            text = text.split(":", 1)[-1].strip()
+        match = re.search(r"(T\d{4}(?:\.\d{3})?)", text, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+        token = text.split()[0].strip()
+        return token.upper() if token else ""
+
+    def _normalize_mitre(matches: Any, tags: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        candidates: List[Any] = []
+        if isinstance(matches, list):
+            candidates.extend(matches)
+        elif matches:
+            candidates.append(matches)
+        if isinstance(tags, list):
+            for tag in tags:
+                tag_value = str(tag or "").strip()
+                if tag_value.lower().startswith("mitre:"):
+                    candidates.append(tag_value.split(":", 1)[-1])
+        for item in candidates:
+            if isinstance(item, dict):
+                tid = item.get("technique_id") or item.get("id") or item.get("technique")
+                name = item.get("technique_name") or item.get("name")
+                tactics = item.get("tactics") or item.get("tactic") or []
+                if not isinstance(tactics, list):
+                    tactics = [tactics]
+                tid = _extract_technique_id(tid or name)
+                if not tid:
+                    continue
+                score = _normalize_confidence(item.get("confidence_score") or item.get("confidence") or 0)
+                normalized.append(
+                    {
+                        "technique_id": tid,
+                        "technique_name": str(name or "").strip(),
+                        "tactics": [str(t).strip() for t in tactics if str(t).strip()],
+                        "confidence_score": score,
+                        "reasoning": item.get("reasoning") or "",
+                        "matched_signals": item.get("matched_signals") or []
+                    }
+                )
+            elif isinstance(item, str):
+                tid = _extract_technique_id(item)
+                if not tid:
+                    continue
+                normalized.append(
+                    {
+                        "technique_id": tid,
+                        "technique_name": "",
+                        "tactics": [],
+                        "confidence_score": 0,
+                        "reasoning": "",
+                        "matched_signals": []
+                    }
+                )
+        dedup: Dict[str, Dict[str, Any]] = {}
+        for match in normalized:
+            tid = match.get("technique_id")
+            if tid and tid not in dedup:
+                dedup[tid] = match
+        return list(dedup.values())
 
     def _is_hash_type(ioc_type: str) -> bool:
         return ioc_type in {"sha256", "md5", "hash"}
@@ -447,7 +517,7 @@ def _build_context(db: Session, alert: DetectionAlert) -> Dict[str, Any]:
             continue
         fields = log.get("fields") or {}
         ioc_intel = fields.get("ioc_intel") or {}
-        mitre_filtered = _filter_mitre(fields.get("mitre_matches") or [])
+        mitre_filtered = _normalize_mitre(fields.get("mitre_matches") or [], log.get("tags") or [])
         ioc_filtered = _filter_iocs(ioc_intel)
         event = {
             "process_name": fields.get("process_name"),
@@ -577,6 +647,353 @@ def _severity_from_confidence(score: int) -> str:
     if normalized >= 40:
         return "medium"
     return "low"
+
+
+def _severity_rank(value: Any) -> int:
+    sev = str(value or "").strip().lower()
+    if sev == "critical":
+        return 4
+    if sev == "high":
+        return 3
+    if sev == "medium":
+        return 2
+    if sev == "low":
+        return 1
+    if sev == "info":
+        return 0
+    return 1
+
+
+def _normalize_tactic(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _extract_technique_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("mitre:"):
+        text = text.split(":", 1)[-1].strip()
+    match = re.search(r"(T\d{4}(?:\.\d{3})?)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    token = text.split()[0].strip()
+    return token.upper() if token else ""
+
+
+def _collect_mitre_indicators(
+    alert: DetectionAlert,
+    context: Dict[str, Any],
+    investigation: Dict[str, Any]
+) -> Dict[str, List[str]]:
+    techniques: List[str] = []
+    tactics: List[str] = []
+
+    def _add_items(items: Any) -> None:
+        if not items:
+            return
+        if not isinstance(items, list):
+            items = [items]
+        for item in items:
+            if isinstance(item, dict):
+                tid = item.get("technique_id") or item.get("id") or item.get("technique")
+                name = item.get("technique_name") or item.get("name")
+                tid = _extract_technique_id(tid or name)
+                if tid:
+                    techniques.append(tid)
+                tac = item.get("tactics") or item.get("tactic") or []
+                if not isinstance(tac, list):
+                    tac = [tac]
+                for t in tac:
+                    tactic_value = _normalize_tactic(t)
+                    if tactic_value:
+                        tactics.append(tactic_value)
+            elif isinstance(item, str):
+                tid = _extract_technique_id(item)
+                if tid:
+                    techniques.append(tid)
+
+    alert_mitre = _parse_json(alert.mitre_json, [])
+    _add_items(alert_mitre)
+    _add_items(context.get("mitre_summary") or [])
+    _add_items(investigation.get("mitre_mapping") or [])
+    for event in context.get("key_events") or []:
+        if not isinstance(event, dict):
+            continue
+        _add_items(event.get("mitre_matches") or [])
+
+    return {
+        "techniques": list(dict.fromkeys(techniques)),
+        "tactics": list(dict.fromkeys(tactics))
+    }
+
+
+def _has_correlated_activity(context: Dict[str, Any]) -> bool:
+    return bool(context.get("risk_signals") or [])
+
+
+def compute_confidence_breakdown(
+    alert: DetectionAlert,
+    context: Dict[str, Any],
+    investigation: Dict[str, Any]
+) -> Dict[str, Any]:
+    context = context or {}
+    investigation = investigation or {}
+    alert_sev = str(alert.severity or "").strip().lower()
+    rule_confidence = {
+        "critical": 30,
+        "high": 25,
+        "medium": 15,
+        "low": 5
+    }.get(alert_sev, 0)
+
+    mitre = _collect_mitre_indicators(alert, context, investigation)
+    tactics = {str(t).strip().lower().replace("-", "_").replace(" ", "_") for t in mitre.get("tactics") or []}
+    high_risk_tactics = {
+        "credential_access",
+        "persistence",
+        "lateral_movement",
+        "command_and_control",
+        "impact",
+        "defense_evasion"
+    }
+    medium_risk_tactics = {
+        "execution",
+        "privilege_escalation",
+        "discovery",
+        "collection",
+        "exfiltration"
+    }
+    mitre_confidence = 0
+    mitre_reason = ""
+    if tactics.intersection(high_risk_tactics):
+        mitre_confidence = 25
+        mitre_reason = "High-risk MITRE tactic"
+    elif tactics.intersection(medium_risk_tactics):
+        mitre_confidence = 15
+        mitre_reason = "Medium-risk MITRE tactic"
+    elif tactics:
+        mitre_confidence = 5
+        mitre_reason = "Low-risk MITRE tactic"
+
+    ioc_matches = _parse_json(alert.ioc_json, [])
+    if not isinstance(ioc_matches, list):
+        ioc_matches = []
+    ioc_summary = context.get("ioc_summary") or {}
+    high_conf_iocs = ioc_summary.get("high_confidence_iocs") or []
+    combined_iocs = []
+    if isinstance(ioc_matches, list):
+        combined_iocs.extend(ioc_matches)
+    if isinstance(high_conf_iocs, list):
+        combined_iocs.extend(high_conf_iocs)
+    ioc_verdicts = {str(item.get("verdict") or "unknown").strip().lower() for item in combined_iocs if isinstance(item, dict)}
+    ioc_confidence = 0
+    ioc_reason = ""
+    if "malicious" in ioc_verdicts:
+        ioc_confidence = 20
+        ioc_reason = "Malicious IOC"
+    elif "suspicious" in ioc_verdicts:
+        ioc_confidence = 10
+        ioc_reason = "Suspicious IOC"
+
+    correlation_items = context.get("risk_signals")
+    if not isinstance(correlation_items, list):
+        correlation_items = context.get("correlation_findings") or []
+    correlation_count = len(correlation_items) if isinstance(correlation_items, list) else 0
+    correlation_confidence = 0
+    correlation_reason = ""
+    if correlation_count >= 2:
+        correlation_confidence = 15
+        correlation_reason = "Correlated activity across multiple events"
+    elif correlation_count == 1:
+        correlation_confidence = 5
+        correlation_reason = "Single related event correlation"
+
+    status = str(investigation.get("status") or "").lower()
+    ai_score = investigation.get("confidence_score")
+    if ai_score is None and isinstance(investigation.get("assessment"), dict):
+        ai_score = investigation.get("assessment", {}).get("confidence_score")
+    try:
+        if status and status != "completed":
+            ai_score = 0
+        ai_score = int(ai_score or 0)
+    except Exception:
+        ai_score = 0
+    ai_score = int(max(0, min(100, ai_score)))
+    ai_confidence = int(max(0, min(10, ai_score // 10)))
+
+    breakdown = {
+        "rule_confidence": int(rule_confidence),
+        "mitre_confidence": int(mitre_confidence),
+        "ioc_confidence": int(ioc_confidence),
+        "correlation_confidence": int(correlation_confidence),
+        "ai_confidence": int(ai_confidence)
+    }
+    total = sum(breakdown.values())
+    original_breakdown = dict(breakdown)
+    original_total = total
+    confidence_floor_applied = False
+    if alert_sev == "critical" and total < 70:
+        ai_confidence_value = int(breakdown.get("ai_confidence") or 0)
+        rule_confidence_value = int(breakdown.get("rule_confidence") or 0)
+        mitre_options = [v for v in [0, 5, 15, 25] if v >= int(breakdown.get("mitre_confidence") or 0)]
+        ioc_options = [v for v in [0, 10, 20] if v >= int(breakdown.get("ioc_confidence") or 0)]
+        correlation_options = [v for v in [0, 5, 15] if v >= int(breakdown.get("correlation_confidence") or 0)]
+        best_choice = None
+        for mitre_value in mitre_options:
+            for ioc_value in ioc_options:
+                for correlation_value in correlation_options:
+                    candidate_total = rule_confidence_value + ai_confidence_value + mitre_value + ioc_value + correlation_value
+                    if candidate_total >= 70:
+                        if best_choice is None or candidate_total < best_choice["total"]:
+                            best_choice = {
+                                "mitre": mitre_value,
+                                "ioc": ioc_value,
+                                "correlation": correlation_value,
+                                "total": candidate_total
+                            }
+        if best_choice is None:
+            best_choice = {
+                "mitre": mitre_options[-1],
+                "ioc": ioc_options[-1],
+                "correlation": correlation_options[-1],
+                "total": rule_confidence_value + ai_confidence_value + mitre_options[-1] + ioc_options[-1] + correlation_options[-1]
+            }
+        breakdown["mitre_confidence"] = int(best_choice["mitre"])
+        breakdown["ioc_confidence"] = int(best_choice["ioc"])
+        breakdown["correlation_confidence"] = int(best_choice["correlation"])
+        total = int(best_choice["total"])
+        confidence_floor_applied = True
+
+    recomputed = sum(breakdown.values())
+    if recomputed != total:
+        logger.error(
+            "confidence breakdown mismatch",
+            extra={"alert_id": alert.id, "computed": total, "recomputed": recomputed}
+        )
+        total = recomputed
+
+    lines = ["Confidence derived from:"]
+    if breakdown["rule_confidence"]:
+        rule_label = {
+            "critical": "Critical detection rule",
+            "high": "High severity rule",
+            "medium": "Medium severity rule",
+            "low": "Low severity rule"
+        }.get(alert_sev, "Rule severity signal")
+        lines.append(f"- {rule_label} (+{breakdown['rule_confidence']})")
+    if breakdown["mitre_confidence"]:
+        reason = mitre_reason or ("Critical severity floor adjustment" if confidence_floor_applied and breakdown["mitre_confidence"] != original_breakdown.get("mitre_confidence") else "")
+        if reason:
+            lines.append(f"- {reason} (+{breakdown['mitre_confidence']})")
+    if breakdown["ioc_confidence"]:
+        reason = ioc_reason or ("Critical severity floor adjustment" if confidence_floor_applied and breakdown["ioc_confidence"] != original_breakdown.get("ioc_confidence") else "")
+        if reason:
+            lines.append(f"- {reason} (+{breakdown['ioc_confidence']})")
+    if breakdown["correlation_confidence"]:
+        reason = correlation_reason or ("Critical severity floor adjustment" if confidence_floor_applied and breakdown["correlation_confidence"] != original_breakdown.get("correlation_confidence") else "")
+        if reason:
+            lines.append(f"- {reason} (+{breakdown['correlation_confidence']})")
+    if breakdown["ai_confidence"]:
+        lines.append(f"- AI assessment (+{breakdown['ai_confidence']})")
+    if confidence_floor_applied and total > original_total:
+        lines.append(f"- Critical severity floor applied (+{int(total - original_total)})")
+
+    return {
+        "confidence_score": int(total),
+        "confidence_breakdown": breakdown,
+        "confidence_explanation": "\n".join(lines),
+        "confidence_floor_applied": confidence_floor_applied,
+        "ai_input_score": int(ai_score)
+    }
+
+
+def _apply_confidence(
+    db: Session,
+    alert: DetectionAlert,
+    context: Dict[str, Any],
+    investigation: Dict[str, Any]
+) -> Dict[str, Any]:
+    confidence = compute_confidence_breakdown(alert, context, investigation)
+    updates = {
+        "confidence_breakdown": confidence.get("confidence_breakdown") or {},
+        "confidence_explanation": confidence.get("confidence_explanation") or "",
+        "confidence_floor_applied": bool(confidence.get("confidence_floor_applied"))
+    }
+    _update_evidence(alert, updates)
+    alert.confidence_score = int(confidence.get("confidence_score") or 0)
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+    return confidence
+
+
+def should_promote_to_incident(
+    alert: DetectionAlert,
+    context: Dict[str, Any],
+    investigation: Dict[str, Any],
+    record: Optional[AIInvestigation]
+) -> Dict[str, Any]:
+    alert_sev = str(alert.severity or "").strip().lower()
+    mitre = _collect_mitre_indicators(alert, context, investigation)
+    tactics = set(mitre.get("tactics") or [])
+    techniques = set(mitre.get("techniques") or [])
+
+    deterministic_reason = ""
+    if alert_sev == "critical":
+        deterministic_reason = "critical_severity"
+    elif alert_sev == "high" and tactics.intersection(
+        {
+            "credential_access",
+            "persistence",
+            "lateral_movement",
+            "command_and_control",
+            "impact",
+            "defense_evasion"
+        }
+    ):
+        deterministic_reason = "high_risk_mitre_tactic"
+    elif any(
+        t.startswith("T1003")
+        or t.startswith("T1059")
+        or t.startswith("T1021")
+        or t.startswith("T1046")
+        for t in techniques
+    ):
+        deterministic_reason = "high_risk_mitre"
+    elif _has_correlated_activity(context):
+        deterministic_reason = "correlated_activity"
+
+    deterministic_incident = bool(deterministic_reason)
+    ai_incident = False
+    if record and record.status == "completed":
+        ai_incident = bool(record.is_incident)
+        ai_confidence = int(record.confidence_score or 0)
+        threshold = int(getattr(settings, "INCIDENT_AI_MIN_CONFIDENCE", 60) or 60)
+        ai_incident = ai_incident and ai_confidence >= threshold
+
+    final_is_incident = deterministic_incident or ai_incident
+    incident_blocked = alert_sev == "critical" and not final_is_incident
+    if deterministic_incident:
+        return {
+            "is_incident": True,
+            "promotion_reason": deterministic_reason,
+            "promotion_source": "deterministic",
+            "incident_blocked": False
+        }
+    if ai_incident:
+        return {
+            "is_incident": True,
+            "promotion_reason": "ai_confirmed",
+            "promotion_source": "ai",
+            "incident_blocked": False
+        }
+    return {
+        "is_incident": final_is_incident,
+        "promotion_reason": "",
+        "promotion_source": "none",
+        "incident_blocked": incident_blocked
+    }
 
 
 def _ensure_ai_decision(alert: DetectionAlert, context: Dict[str, Any], investigation: AIInvestigation) -> Dict[str, Any]:
@@ -792,18 +1209,93 @@ async def run_ai_investigation_and_maybe_create_incident(alert_id: int, force: b
             "latest_investigation_id": record.id
         }
 
+        investigation = _parse_json(record.investigation_json, {})
+        promotion = should_promote_to_incident(alert, context, investigation, record)
+        final_is_incident = bool(promotion.get("is_incident"))
+        promotion_reason = str(promotion.get("promotion_reason") or "")
+        promotion_source = str(promotion.get("promotion_source") or "none")
+        incident_blocked = bool(promotion.get("incident_blocked"))
+        ai_is_incident = bool(record.is_incident)
+
+        if incident_blocked:
+            updates["incident_blocked"] = True
+            logger.error(
+                "critical incident blocked",
+                extra={"alert_id": alert_id, "promotion_source": promotion_source}
+            )
+
         if record.status == "completed":
-            alert.confidence_score = int(record.confidence_score or 0)
             incident_severity = str(record.incident_severity or "").strip().lower()
-            if record.is_incident and incident_severity in {"low", "medium", "high", "critical"}:
+            if final_is_incident and incident_severity in {"low", "medium", "high", "critical"}:
                 alert.severity = incident_severity
             else:
                 alert.severity = _severity_from_confidence(int(record.confidence_score or 0))
 
-        threshold = int(getattr(settings, "INCIDENT_AI_MIN_CONFIDENCE", 60) or 60)
-        if record.status == "completed" and record.is_incident and int(record.confidence_score or 0) >= threshold:
-            decision = _ensure_ai_decision(alert, context, record)
-            incident = create_or_link_incident(db, decision, alert)
+        investigation_payload = _parse_json(record.investigation_json, {})
+        if not isinstance(investigation_payload, dict):
+            investigation_payload = {}
+        investigation_payload["status"] = record.status
+        investigation_payload["confidence_score"] = int(record.confidence_score or 0)
+        confidence = compute_confidence_breakdown(alert, context, investigation_payload)
+        alert.confidence_score = int(confidence.get("confidence_score") or 0)
+        updates.update(
+            {
+                "confidence_breakdown": confidence.get("confidence_breakdown") or {},
+                "confidence_explanation": confidence.get("confidence_explanation") or "",
+                "confidence_floor_applied": bool(confidence.get("confidence_floor_applied"))
+            }
+        )
+        investigation_payload["confidence_breakdown"] = confidence.get("confidence_breakdown") or {}
+        investigation_payload["confidence_explanation"] = confidence.get("confidence_explanation") or ""
+        record.investigation_json = json.dumps(investigation_payload)
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+
+        if final_is_incident:
+            if promotion_source == "ai":
+                decision = _ensure_ai_decision(alert, context, record)
+            else:
+                decision = decide_incident(alert, build_incident_context(db, alert))
+                decision["should_create"] = True
+            if promotion_reason:
+                decision["reason"] = promotion_reason
+
+            # --- PHASE B: PROMOTION SAFETY GATE ---
+            gate_required = ["confidence_score", "severity", "reason"]
+            gate_missing = [f for f in gate_required if not decision.get(f)]
+            
+            if gate_missing:
+                logger.error(
+                    "promotion blocked (safety gate)",
+                    extra={
+                        "alert_id": alert_id,
+                        "missing_fields": gate_missing
+                    }
+                )
+                final_is_incident = False
+            else:
+                logger.info(
+                    "promotion safety gate passed",
+                    extra={
+                        "alert_id": alert_id,
+                        "rule_name": alert.rule_name,
+                        "severity": decision.get("severity"),
+                        "confidence": decision.get("confidence_score"),
+                        "promotion_reason": decision.get("reason")
+                    }
+                )
+            # --------------------------------------
+
+            if promotion_source == "deterministic":
+                decision_sev = decision.get("severity") or alert.severity
+                if _severity_rank(decision_sev) < _severity_rank(alert.severity):
+                    decision["severity"] = alert.severity
+            
+            incident = None
+            if final_is_incident:
+                incident = create_or_link_incident(db, decision, alert)
+            
             if incident:
                 updates["incident_id"] = incident.id
                 logger.info(
@@ -817,6 +1309,7 @@ async def run_ai_investigation_and_maybe_create_incident(alert_id: int, force: b
             else:
                 logger.info("incident skipped (dedup or create failed)", extra={"alert_id": alert_id})
         else:
+            threshold = int(getattr(settings, "INCIDENT_AI_MIN_CONFIDENCE", 60) or 60)
             logger.info(
                 "incident skipped (gating)",
                 extra={
