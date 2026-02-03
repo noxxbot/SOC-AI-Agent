@@ -20,7 +20,7 @@ const Sidebar: React.FC = () => {
           <div className="w-8 h-8 bg-emerald-500/20 rounded-lg flex items-center justify-center">
             <i className="fa-solid fa-satellite-dish text-xl"></i>
           </div>
-          <h1 className="text-xl font-bold tracking-tight text-slate-100">SENTINEL AI</h1>
+          <h1 className="text-xl font-bold tracking-tight text-slate-100">KAVACH AI</h1>
         </div>
 
         <nav className="space-y-2">

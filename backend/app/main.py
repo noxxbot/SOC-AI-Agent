@@ -7,7 +7,7 @@ from app.models.correlation_finding import CorrelationFinding
 from app.models.detection_alert import DetectionAlert
 from app.models.ai_investigation import AIInvestigation
 from app.models.incident import Incident
-from app.routes import health, analysis, alerts, telemetry, agents, logs, correlation, detections
+from app.routes import health, analysis, alerts, telemetry, agents, logs, correlation, detections, notifications
 from app.routes import ai_investigations, incidents
 from app.core.config import settings
 from app.routes import threat_intel
@@ -56,6 +56,7 @@ app.add_middleware(
 # Include Routers
 # Health check is included at the root for easy access
 app.include_router(health.router)
+app.include_router(notifications.router)
 
 
 # V1 API Routes

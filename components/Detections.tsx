@@ -7,6 +7,7 @@ const Detections: React.FC = () => {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastSync, setLastSync] = useState<Date | null>(null);
   const navigate = useNavigate();
 
   const fetchAlerts = async () => {
@@ -15,6 +16,7 @@ const Detections: React.FC = () => {
     try {
       const data = await api.getDetectionAlerts(100);
       setAlerts(data);
+      setLastSync(new Date());
     } catch (err: any) {
       setError(err?.message || 'Failed to load detections.');
     } finally {
@@ -32,15 +34,39 @@ const Detections: React.FC = () => {
         <div>
           <h1 className="text-3xl font-bold text-slate-50">Detections</h1>
           <p className="text-slate-500 text-sm">Rule engine alerts with evidence, MITRE mapping, and IOC context</p>
+          {lastSync && (
+            <div className="text-[10px] font-mono text-slate-600 mt-1">LAST UPDATED: {lastSync.toLocaleTimeString()}</div>
+          )}
         </div>
-        <button
-          onClick={fetchAlerts}
-          disabled={loading}
-          className="bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 px-4 py-2 rounded-xl text-sm flex items-center gap-2 transition-all"
-        >
-          <i className={`fa-solid fa-rotate ${loading ? 'fa-spin' : ''}`}></i>
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={async () => {
+              setLoading(true);
+              setError(null);
+              try {
+                await api.runDetections();
+                await fetchAlerts();
+              } catch (err: any) {
+                setError(err?.message || 'Failed to run detections.');
+              } finally {
+                setLoading(false);
+              }
+            }}
+            disabled={loading}
+            className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl text-sm flex items-center gap-2 transition-all"
+          >
+            <i className="fa-solid fa-play"></i>
+            Run Detections
+          </button>
+          <button
+            onClick={fetchAlerts}
+            disabled={loading}
+            className="bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 px-4 py-2 rounded-xl text-sm flex items-center gap-2 transition-all"
+          >
+            <i className={`fa-solid fa-rotate ${loading ? 'fa-spin' : ''}`}></i>
+            Refresh
+          </button>
+        </div>
       </header>
 
       {error && (

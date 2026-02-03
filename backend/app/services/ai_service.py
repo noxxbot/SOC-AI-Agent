@@ -1967,3 +1967,49 @@ Structured Context:
             results.append(result)
             print(json.dumps(result, indent=2))
         return results
+
+    async def generate_tactical_briefing(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        'Generates an LLM-enriched tactical briefing strictly from provided context.'
+        system_rules = (
+            "You are a SOC incident summarization assistant. "
+            "You must only explain and clarify why this incident was promoted using the supplied structured fields. "
+            "Do not invent evidence, intent, or attacker goals. "
+            "If information is missing, state that it was not observed."
+        )
+
+        prompt = (
+            "SYSTEM RULES:\n" + system_rules + "\n\n"
+            "TASK:\n"
+            "Return JSON only with keys: \"focus\", \"actions\", \"data_gaps\".\n"
+            "- focus: 1-2 short paragraphs, incident-specific, not a copy of raw fields.\n"
+            "- actions: 1-3 concise analyst actions grounded in the context.\n"
+            "- data_gaps: list of strings in this exact format: \"<Dimension>: No evidence observed for this dimension.\"\n\n"
+            "RESTRICTIONS:\n"
+            "- Use ONLY the provided context.\n"
+            "- Do NOT add new evidence.\n"
+            "- Do NOT restate fields verbatim.\n"
+            "- If a dimension has no data, add a data_gaps entry for it (use dimensions_missing if provided).\n"
+            "- Do not suggest containment unless allow_containment is true.\n\n"
+            "CONTEXT (JSON):\n" + json.dumps(context, indent=2)
+        )
+
+        try:
+            raw = await self._ask_ollama(prompt)
+            cleaned = self._clean_llm_output(raw)
+            data = self._extract_json_from_text(cleaned) or {}
+        except Exception as exc:
+            self.logger.error(f"Tactical briefing LLM call failed: {exc}")
+            return {"focus": "", "actions": [], "data_gaps": []}
+
+        focus = str(data.get("focus") or "").strip()
+        actions = data.get("actions") if isinstance(data.get("actions"), list) else []
+        data_gaps = data.get("data_gaps") if isinstance(data.get("data_gaps"), list) else []
+
+        actions = [str(a).strip() for a in actions if str(a).strip()]
+        data_gaps = [str(g).strip() for g in data_gaps if str(g).strip()]
+
+        return {
+            "focus": focus,
+            "actions": actions,
+            "data_gaps": data_gaps
+        }

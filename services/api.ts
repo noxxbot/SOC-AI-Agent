@@ -16,6 +16,10 @@ async function fetchJson(url: string, options?: RequestInit) {
 }
 
 export const api = {
+  async getHealth(): Promise<any> {
+    return fetchJson(`${BASE_URL}/health`);
+  },
+
   async getAgents(): Promise<Agent[]> {
     return fetchJson(`${BASE_URL}/agents`);
   },
@@ -79,8 +83,9 @@ export const api = {
     });
   },
 
-  async getProcessedLogs(limit: number = 100): Promise<ProcessedLog[]> {
-    return fetchJson(`${BASE_URL}/logs/processed/recent?limit=${limit}`);
+  async getProcessedLogs(limit: number = 100, include_ai: boolean = false): Promise<ProcessedLog[]> {
+    const aiParam = include_ai ? '&include_ai=true' : '';
+    return fetchJson(`${BASE_URL}/logs/processed/recent?limit=${limit}${aiParam}`);
   },
 
   async getProcessedLog(id: number): Promise<ProcessedLog> {
@@ -93,6 +98,10 @@ export const api = {
 
   async getDetectionAlert(id: number): Promise<Alert> {
     return fetchJson(`${BASE_URL}/detections/alerts/${id}`);
+  },
+
+  async runDetections(): Promise<any> {
+    return fetchJson(`${BASE_URL}/detections/run`, { method: 'POST' });
   },
 
   async runInvestigation(alert_id: number, force: boolean = true): Promise<Investigation> {
@@ -113,5 +122,9 @@ export const api = {
 
   async getIncident(incident_id: number): Promise<Incident> {
     return fetchJson(`${BASE_URL}/incidents/${incident_id}`);
+  },
+
+  async getIncidentTacticalBriefing(incident_id: number): Promise<any> {
+    return fetchJson(`${BASE_URL}/incidents/${incident_id}/tactical-briefing`, { method: 'POST' });
   }
 };

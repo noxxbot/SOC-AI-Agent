@@ -60,12 +60,14 @@ const Dashboard: React.FC = () => {
 
     fetchDashboardStats();
     const interval = setInterval(fetchDashboardStats, 10000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+    };
   }, []);
 
   const severityDistribution = [
-    { name: 'Critical/High', value: stats.criticalAlerts, color: '#ef4444' },
-    { name: 'Total Alerts', value: stats.totalAlerts, color: '#3b82f6' },
+    { name: 'Telemetry High/Critical', value: stats.criticalAlerts, color: '#ef4444' },
+    { name: 'Telemetry Alerts', value: stats.totalAlerts, color: '#3b82f6' },
     { name: 'Endpoints', value: stats.agentsOnline, color: '#10b981' },
   ];
 
@@ -76,16 +78,13 @@ const Dashboard: React.FC = () => {
           <h1 className="text-3xl font-bold text-slate-50">Operations Overview</h1>
           <p className="text-slate-400">Real-time status of security infrastructure</p>
         </div>
-        <div className="bg-emerald-500/5 border border-emerald-500/10 px-4 py-2 rounded-xl flex items-center gap-3">
-          <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-          <span className="text-xs font-mono text-emerald-500 uppercase tracking-widest font-bold">Live Stream: Active</span>
-        </div>
+        
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard label="Endpoints Active" value={stats.agentsOnline} trend="+2" icon="fa-server" color="emerald" />
-        <StatCard label="High/Critical" value={stats.criticalAlerts} trend={stats.criticalAlerts > 0 ? "+1" : "0"} icon="fa-triangle-exclamation" color="rose" />
-        <StatCard label="Total Alert Count" value={stats.totalAlerts} trend="+12" icon="fa-bolt" color="blue" />
+        <StatCard label="High/Critical (Telemetry)" value={stats.criticalAlerts} trend={stats.criticalAlerts > 0 ? "+1" : "0"} icon="fa-triangle-exclamation" color="rose" />
+        <StatCard label="Telemetry Alerts" value={stats.totalAlerts} trend="+12" icon="fa-bolt" color="blue" />
         <StatCard label="Network Security" value="98%" trend="stable" icon="fa-shield-halved" color="amber" />
       </div>
 

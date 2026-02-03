@@ -798,6 +798,7 @@ def run_rule_engine(processed_ids: Optional[List[int]] = None) -> Dict[str, Any]
                 )
             continue
         reasons: List[str] = []
+        emitted = False
         if _has_mitre_matches(event):
             reasons.append("MITRE match")
         if _has_encoded_command(event):
@@ -812,6 +813,7 @@ def run_rule_engine(processed_ids: Optional[List[int]] = None) -> Dict[str, Any]
         if reasons:
             signal_alerts.append(_build_signal_alert(event, window_seconds, reasons))
             has_signal = True
+            emitted = True
             if severity_score >= critical_score_threshold:
                 logger.debug(
                     "critical fallback skipped",
@@ -826,6 +828,7 @@ def run_rule_engine(processed_ids: Optional[List[int]] = None) -> Dict[str, Any]
             if processed_id is not None:
                 mitre_confidence = _mitre_detection_confidence(mitre_matches, severity_score)
                 mitre_alerts.append(_build_mitre_high_risk_alert(event, mitre_confidence))
+                emitted = True
                 technique_ids = [m.get("technique_id") for m in mitre_matches if m.get("technique_id")]
                 logger.info(
                     "mitre high risk alert created",
@@ -840,6 +843,7 @@ def run_rule_engine(processed_ids: Optional[List[int]] = None) -> Dict[str, Any]
             if processed_id is not None:
                 ioc_severity = "critical" if ioc_risk == "malicious" else "high"
                 ioc_alerts.append(_build_ioc_hit_alert(event, ioc_confidence, ioc_severity))
+                emitted = True
                 logger.info(
                     "ioc hit alert created",
                     extra={
@@ -861,12 +865,23 @@ def run_rule_engine(processed_ids: Optional[List[int]] = None) -> Dict[str, Any]
                 )
                 continue
             fallback_alerts.append(_build_critical_fallback_alert(event, severity_score))
+            emitted = True
             logger.info(
                 "critical fallback alert created",
                 extra={
                     "processed_id": processed_id,
                     "fingerprint": fingerprint,
                     "severity_score": severity_score
+                }
+            )
+
+        if not emitted and not has_signal and not mitre_matches and not ioc_risk and severity_score < critical_score_threshold:
+            logger.debug(
+                "log skipped",
+                extra={
+                    "reason": "no_detection_conditions",
+                    "processed_id": processed_id,
+                    "fingerprint": fingerprint
                 }
             )
 

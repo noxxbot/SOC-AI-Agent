@@ -1,5 +1,15 @@
 from typing import List
 from fastapi import WebSocket
+import asyncio
+
+def broadcast_sync(message: dict) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(manager.broadcast(message))
+        return
+    loop.create_task(manager.broadcast(message))
+
 
 class ConnectionManager:
     def __init__(self):

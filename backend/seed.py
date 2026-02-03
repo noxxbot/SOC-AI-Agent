@@ -2,6 +2,9 @@ print("🔥 seed.py started...")
 from datetime import datetime
 from app.database.db import SessionLocal, Base, engine
 from app.models.models import Agent, Alert
+from app.models.detection_alert import DetectionAlert
+from app.models.incident import Incident
+import json
 
 # create tables (safe)
 Base.metadata.create_all(bind=engine)

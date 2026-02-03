@@ -16,7 +16,7 @@ ai_service = AIService()
 @router.post("/analyze", response_model=LogAnalysisResponse)
 async def analyze_logs(request: LogAnalysisRequest):
     """
-    Analyzes raw logs for security threats using Gemini AI.
+    Analyzes raw logs for security threats using a local LLM.
     """
     try:
         result = await ai_service.analyze_security_logs(request.logs)

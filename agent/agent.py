@@ -213,7 +213,7 @@ def main():
     agent_id = config.get("agent_id")
     interval_seconds = int(config.get("interval_seconds", 5))
     
-    print(f"Sentinel AI Agent [{agent_id}] initialized.")
+    print(f"Kavach AI Agent [{agent_id}] initialized.")
     print(f"Target Backend: {backend_url}")
     print("Monitoring active... Press Ctrl+C to stop.")
 

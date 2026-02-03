@@ -12,6 +12,7 @@ const LogAnalyzer: React.FC = () => {
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [severityFilter, setSeverityFilter] = useState('all');
   const [agentFilter, setAgentFilter] = useState('all');
+  const [includeAI, setIncludeAI] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const navigate = useNavigate();
 
@@ -35,7 +36,7 @@ const LogAnalyzer: React.FC = () => {
     if (showLoading) setLoading(true);
     setError(null);
     try {
-      const data = await api.getProcessedLogs(100);
+      const data = await api.getProcessedLogs(100, includeAI);
       setLogs(data);
       setLastUpdated(new Date());
     } catch (err: any) {
@@ -49,7 +50,7 @@ const LogAnalyzer: React.FC = () => {
     fetchLogs(true);
     const interval = setInterval(() => fetchLogs(), 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [includeAI]);
 
   const categories = useMemo(() => {
     return Array.from(new Set(logs.map((log) => log.category).filter(Boolean))).sort();
@@ -154,6 +155,13 @@ const LogAnalyzer: React.FC = () => {
               <option key={agent} value={agent}>{agent}</option>
             ))}
           </select>
+          <button
+            onClick={() => setIncludeAI((v) => !v)}
+            className="bg-slate-950 border border-slate-800 hover:border-slate-700 text-slate-300 px-4 py-2 rounded-xl text-sm flex items-center gap-2 transition-all"
+          >
+            <i className="fa-solid fa-brain"></i>
+            {includeAI ? 'AI Notes: On' : 'AI Notes: Off'}
+          </button>
           <button
             onClick={() => fetchLogs(true)}
             disabled={loading}

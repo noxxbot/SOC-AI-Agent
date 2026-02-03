@@ -42,7 +42,7 @@ const IncidentsList: React.FC = () => {
           <h1 className="text-3xl font-bold text-slate-50">Incidents</h1>
           <p className="text-slate-500 text-sm">Recent incidents linked to detection alerts</p>
           {lastSync && (
-            <div className="text-[10px] font-mono text-slate-600 mt-1">LAST SYNC: {lastSync.toLocaleTimeString()}</div>
+            <div className="text-[10px] font-mono text-slate-600 mt-1">LAST UPDATED: {lastSync.toLocaleTimeString()}</div>
           )}
         </div>
         <button

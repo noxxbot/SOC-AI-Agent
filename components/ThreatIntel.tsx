@@ -447,7 +447,7 @@ const ThreatIntel: React.FC = () => {
       {result?.correlated_alerts?.length > 0 ? (
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
           <h4 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">
-            Correlated Alerts Found
+            Correlated Telemetry Alerts
           </h4>
 
           <div className="space-y-3">
@@ -466,7 +466,7 @@ const ThreatIntel: React.FC = () => {
         result && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
             <h4 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-2">
-              Correlated Alerts Found
+              Correlated Telemetry Alerts
             </h4>
             <p className="text-slate-400 text-sm">No matching alerts found in your database for this query.</p>
           </div>

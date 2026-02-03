@@ -127,7 +127,16 @@ const LogDetails: React.FC = () => {
             </div>
           </div>
 
+          {log?.ai_notes && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+            <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">AI Notes</div>
+            <pre className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs text-slate-300 overflow-auto max-h-64">
+              {JSON.stringify(log.ai_notes || {}, null, 2)}
+            </pre>
+          </div>
+        )}
+
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs text-slate-400">
               <div><span className="text-slate-500">Fingerprint:</span> {log.fingerprint || '—'}</div>
               <div><span className="text-slate-500">Created At:</span> {formatTime(log.created_at || null)}</div>

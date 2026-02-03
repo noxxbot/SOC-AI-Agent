@@ -18,6 +18,10 @@ import { api } from './services/api';
 
 const App: React.FC = () => {
   const [notification, setNotification] = useState<{title: string, severity: string} | null>(null);
+  const [systemStatus, setSystemStatus] = useState<{online: boolean; uptime: string}>({
+    online: false,
+    uptime: '--:--:--'
+  });
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -27,7 +31,7 @@ const App: React.FC = () => {
     socket.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
-        if (payload.type === 'NEW_ALERT') {
+        if (payload.type === 'NEW_ALERT' || payload.type === 'NEW_DETECTION') {
           setNotification({
             title: payload.data.title,
             severity: payload.data.severity
@@ -43,6 +47,42 @@ const App: React.FC = () => {
     
     return () => {
       socket.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    const formatUptime = (seconds: number) => {
+      if (!seconds || seconds < 0) return '--:--:--';
+      const hrs = Math.floor(seconds / 3600);
+      const mins = Math.floor((seconds % 3600) / 60);
+      const secs = Math.floor(seconds % 60);
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${pad(hrs)}:${pad(mins)}:${pad(secs)}`;
+    };
+    const fetchHealth = async () => {
+      try {
+        const data = await api.getHealth();
+        const backendOnline = data?.status === 'ok';
+        const ollamaReady = Boolean(data?.ollama?.ready);
+        const uptimeSeconds = Number(data?.uptime_seconds || 0);
+        if (isMounted) {
+          setSystemStatus({
+            online: backendOnline && ollamaReady,
+            uptime: formatUptime(uptimeSeconds)
+          });
+        }
+      } catch {
+        if (isMounted) {
+          setSystemStatus({ online: false, uptime: '--:--:--' });
+        }
+      }
+    };
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 15000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
     };
   }, []);
 
@@ -83,11 +123,11 @@ const App: React.FC = () => {
 
           <div className="absolute top-0 right-0 p-8 flex items-center gap-4 text-xs font-mono text-slate-600 pointer-events-none">
              <span className="flex items-center gap-1">
-               <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></div>
-               SYSTEM: ONLINE
+               <div className={`w-1.5 h-1.5 rounded-full ${systemStatus.online ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`}></div>
+               SYSTEM: {systemStatus.online ? 'ONLINE' : 'OFFLINE'}
              </span>
              <span className="border-l border-slate-800 pl-4">
-               UPTIME: 142:52:11
+               UPTIME: {systemStatus.uptime}
              </span>
           </div>
 

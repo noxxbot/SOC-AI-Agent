@@ -19,6 +19,7 @@ from app.models.models import ProcessedLog
 from app.services.ai_service import AIService
 from app.services.incident_engine import build_incident_context, decide_incident, create_or_link_incident
 from app.services.rule_engine import run_rule_engine
+from app.services.notification_service import broadcast_sync
 
 logger = logging.getLogger(__name__)
 ai_service = AIService()
@@ -281,6 +282,15 @@ def run_detection_pipeline_task(processed_ids: Optional[List[int]] = None) -> Di
             else:
                 created_alerts.append(record)
                 logger.info("alert created", extra={"alert_id": record.id, "fingerprint": record.fingerprint})
+                broadcast_sync({
+                    "type": "NEW_DETECTION",
+                    "data": {
+                        "id": record.id,
+                        "title": record.summary or record.rule_name,
+                        "severity": record.severity,
+                        "rule_id": record.rule_id
+                    }
+                })
             evidence = alert_payload.get("evidence") or {}
             processed_ids_from_evidence = evidence.get("processed_ids") or []
             fingerprints = evidence.get("fingerprints") or []
@@ -928,70 +938,161 @@ def _apply_confidence(
     return confidence
 
 
+def evaluate_incident_policy(
+    alert: DetectionAlert,
+    context: Dict[str, Any],
+    investigation: Dict[str, Any],
+    record: Optional[AIInvestigation]
+) -> Dict[str, Any]:
+    """
+    Deterministic Incident Promotion Policy (v1.0)
+    
+    Decides if a detection + AI investigation should become an incident.
+    This policy is authoritative, explicit, and fail-closed.
+    
+    Inputs:
+    - alert: The source detection
+    - context: Enrichment context (MITRE, IOCs, etc.)
+    - investigation: The AI's JSON output
+    - record: The AI investigation DB record
+    
+    Returns:
+    - decision: "allow" or "deny"
+    - reason: Specific policy rule matched
+    - metadata: Policy version and inputs used
+    """
+    policy_version = "v1.0-deterministic"
+    
+    # --- FAIL-CLOSED PRE-CHECKS ---
+    if not record:
+        return {"decision": "deny", "reason": "no_ai_record", "policy": policy_version}
+    
+    if record.status != "completed":
+        return {"decision": "deny", "reason": "ai_investigation_incomplete", "policy": policy_version}
+        
+    # Gather Inputs
+    alert_sev = str(alert.severity or "").strip().lower()
+    mitre = _collect_mitre_indicators(alert, context, investigation)
+    tactics = set(mitre.get("tactics") or [])
+    techniques = set(mitre.get("techniques") or [])
+    
+    ai_is_incident = bool(record.is_incident)
+    ai_confidence = int(record.confidence_score or 0)
+    ai_threshold = int(getattr(settings, "INCIDENT_AI_MIN_CONFIDENCE", 60) or 60)
+    
+    # --- POLICY RULES ---
+    
+    # RULE 1: AI Confirmed Incident
+    # If AI explicitly says "YES" and confidence is high enough -> PROMOTE
+    if ai_is_incident and ai_confidence >= ai_threshold:
+        return {
+            "decision": "allow",
+            "reason": "rule_ai_confirmed",
+            "policy": policy_version,
+            "source": "ai",
+            "meta": {"ai_confidence": ai_confidence, "threshold": ai_threshold}
+        }
+
+    # RULE 2: Critical Severity Deterministic
+    # If the alert is CRITICAL -> PROMOTE (Safety Net)
+    if alert_sev == "critical":
+        return {
+            "decision": "allow",
+            "reason": "rule_critical_severity",
+            "policy": policy_version,
+            "source": "deterministic",
+            "meta": {"severity": "critical"}
+        }
+        
+    # RULE 3: High-Risk MITRE Tactic
+    # If HIGH severity AND High-Risk Tactic -> PROMOTE
+    high_risk_tactics = {
+        "credential_access",
+        "persistence",
+        "lateral_movement",
+        "command_and_control",
+        "impact",
+        "defense_evasion"
+    }
+    if alert_sev == "high" and tactics.intersection(high_risk_tactics):
+        return {
+            "decision": "allow",
+            "reason": "rule_high_risk_mitre_tactic",
+            "policy": policy_version,
+            "source": "deterministic",
+            "meta": {"tactics": list(tactics.intersection(high_risk_tactics))}
+        }
+
+    # RULE 4: Specific High-Risk Techniques
+    # If specific critical techniques are present -> PROMOTE
+    # T1003 (OS Credential Dumping), T1059 (Command and Scripting Interpreter), etc.
+    high_risk_prefixes = ("T1003", "T1059", "T1021", "T1046")
+    matched_techniques = [t for t in techniques if t.startswith(high_risk_prefixes)]
+    if matched_techniques:
+        return {
+            "decision": "allow",
+            "reason": "rule_high_risk_technique",
+            "policy": policy_version,
+            "source": "deterministic",
+            "meta": {"techniques": matched_techniques}
+        }
+        
+    # RULE 5: Correlated Activity
+    # If there are correlated findings in context -> PROMOTE
+    if _has_correlated_activity(context):
+        return {
+            "decision": "allow",
+            "reason": "rule_correlated_activity",
+            "policy": policy_version,
+            "source": "deterministic",
+            "meta": {"correlation": "present"}
+        }
+
+    # DEFAULT: DENY
+    return {
+        "decision": "deny",
+        "reason": "no_policy_match",
+        "policy": policy_version,
+        "source": "none"
+    }
+
+
 def should_promote_to_incident(
     alert: DetectionAlert,
     context: Dict[str, Any],
     investigation: Dict[str, Any],
     record: Optional[AIInvestigation]
 ) -> Dict[str, Any]:
+    # Delegate to the explicit policy layer
+    policy_result = evaluate_incident_policy(alert, context, investigation, record)
+    
+    is_allowed = policy_result["decision"] == "allow"
+    reason = policy_result.get("reason") or "unknown"
+    source = policy_result.get("source") or "none"
+    policy_ver = policy_result.get("policy")
+    
+    # Structured Audit Log
+    logger.info(
+        "incident promotion policy evaluated",
+        extra={
+            "alert_id": alert.id,
+            "rule_name": alert.rule_name,
+            "decision": policy_result["decision"],
+            "reason": reason,
+            "policy_version": policy_ver,
+            "meta": policy_result.get("meta")
+        }
+    )
+    
+    # Map back to expected legacy format for compatibility
+    # Note: incident_blocked is true if it was CRITICAL but Denied
     alert_sev = str(alert.severity or "").strip().lower()
-    mitre = _collect_mitre_indicators(alert, context, investigation)
-    tactics = set(mitre.get("tactics") or [])
-    techniques = set(mitre.get("techniques") or [])
-
-    deterministic_reason = ""
-    if alert_sev == "critical":
-        deterministic_reason = "critical_severity"
-    elif alert_sev == "high" and tactics.intersection(
-        {
-            "credential_access",
-            "persistence",
-            "lateral_movement",
-            "command_and_control",
-            "impact",
-            "defense_evasion"
-        }
-    ):
-        deterministic_reason = "high_risk_mitre_tactic"
-    elif any(
-        t.startswith("T1003")
-        or t.startswith("T1059")
-        or t.startswith("T1021")
-        or t.startswith("T1046")
-        for t in techniques
-    ):
-        deterministic_reason = "high_risk_mitre"
-    elif _has_correlated_activity(context):
-        deterministic_reason = "correlated_activity"
-
-    deterministic_incident = bool(deterministic_reason)
-    ai_incident = False
-    if record and record.status == "completed":
-        ai_incident = bool(record.is_incident)
-        ai_confidence = int(record.confidence_score or 0)
-        threshold = int(getattr(settings, "INCIDENT_AI_MIN_CONFIDENCE", 60) or 60)
-        ai_incident = ai_incident and ai_confidence >= threshold
-
-    final_is_incident = deterministic_incident or ai_incident
-    incident_blocked = alert_sev == "critical" and not final_is_incident
-    if deterministic_incident:
-        return {
-            "is_incident": True,
-            "promotion_reason": deterministic_reason,
-            "promotion_source": "deterministic",
-            "incident_blocked": False
-        }
-    if ai_incident:
-        return {
-            "is_incident": True,
-            "promotion_reason": "ai_confirmed",
-            "promotion_source": "ai",
-            "incident_blocked": False
-        }
+    incident_blocked = (alert_sev == "critical" and not is_allowed)
+    
     return {
-        "is_incident": final_is_incident,
-        "promotion_reason": "",
-        "promotion_source": "none",
+        "is_incident": is_allowed,
+        "promotion_reason": reason,
+        "promotion_source": source,
         "incident_blocked": incident_blocked
     }
 
