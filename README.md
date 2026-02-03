@@ -1,4 +1,4 @@
-# SOC Operations Copilot
+# KAVACH AI-Agentic SOC
 
 ## 🛡️ Project Overview
 
